@@ -24,8 +24,12 @@ Usage:
   # Make sure the server is up (see run_server.sh)
   uv run python fsm_vs_free_eval.py --n-problems 30 --dataset humaneval
 
-  # Try MBPP+
+  # MBPP+
   uv run python fsm_vs_free_eval.py --n-problems 50 --dataset mbpp
+
+  # LiveCodeBench, post-cutoff (contamination-clean test)
+  uv run python fsm_vs_free_eval.py --dataset livecodebench \\
+      --date-cutoff 2025-12-01 --platform leetcode --n-problems 50
 
   # Free-only or FSM-only (for debugging)
   uv run python fsm_vs_free_eval.py --only free --n-problems 10
@@ -49,16 +53,59 @@ from typing import Optional
 # Dataset loading
 # ---------------------------------------------------------------------------
 
-def load_benchmark(name: str, n: int):
+def load_benchmark(name: str, n: int, args=None):
     from datasets import load_dataset
     if name == "humaneval":
         ds = load_dataset("evalplus/humanevalplus", split="test")
-        # Fields: task_id, prompt, canonical_solution, test, entry_point
+        rows = list(ds)
     elif name == "mbpp":
         ds = load_dataset("evalplus/mbppplus", split="test")
+        rows = list(ds)
+    elif name == "livecodebench":
+        version = getattr(args, "lcb_version", "release_v5")
+        date_cutoff = getattr(args, "date_cutoff", "")
+        platform = getattr(args, "platform", "leetcode")
+
+        print(f"  loading livecodebench/code_generation_lite (version={version})")
+        ds = load_dataset(
+            "livecodebench/code_generation_lite",
+            split="test",
+            version_tag=version,
+            trust_remote_code=True,
+        )
+        rows = list(ds)
+        print(f"  {len(rows)} total problems in {version}")
+
+        if date_cutoff:
+            rows = [r for r in rows if r.get("contest_date", "") >= date_cutoff]
+            print(f"  {len(rows)} after contest_date >= {date_cutoff}")
+        if platform:
+            rows = [r for r in rows if r.get("platform", "") == platform]
+            print(f"  {len(rows)} after platform == {platform}")
+
+        # Keep only problems whose public tests are all functional.  LCB
+        # has a mix of functional (LeetCode-style) and stdin (competitive-
+        # programming-style) tests; we only handle functional here.
+        kept = []
+        for r in rows:
+            raw = r.get("public_test_cases", "") or "[]"
+            try:
+                tests = json.loads(raw)
+            except Exception:
+                continue
+            if not tests:
+                continue
+            if all(t.get("testtype") == "functional" for t in tests):
+                kept.append(r)
+        rows = kept
+        print(f"  {len(rows)} after functional-tests-only filter")
+
+        # Normalize a task_id for reporting — use question_id.
+        for r in rows:
+            r.setdefault("task_id", r.get("question_id", r.get("question_title", "unknown")))
     else:
         raise ValueError(f"unknown dataset {name}")
-    rows = list(ds)
+
     return rows[:n] if n > 0 else rows
 
 
@@ -84,6 +131,18 @@ def build_user_prompt(problem: dict, dataset: str) -> str:
         return (
             f"{problem['prompt']}\n\n"
             "Write the complete implementation in Python."
+        )
+    elif dataset == "livecodebench":
+        starter = (problem.get("starter_code") or "").strip()
+        starter_block = (
+            f"\n\nStarter code:\n```python\n{starter}\n```" if starter else ""
+        )
+        return (
+            f"{problem['question_content']}"
+            f"{starter_block}\n\n"
+            "Implement the complete solution in Python.  If a class Solution "
+            "signature is provided, use it.  Return only runnable code in a "
+            "```python``` block."
         )
     raise ValueError(dataset)
 
@@ -175,6 +234,108 @@ def count_tokens(text: str, model_name: str) -> int:
 # ---------------------------------------------------------------------------
 # Test execution (sandboxed-ish via subprocess)
 # ---------------------------------------------------------------------------
+
+def _extract_lcb_fn_name(problem: dict) -> str:
+    """Find the entry-point function name for a LiveCodeBench problem."""
+    meta = problem.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    for k in ("func_name", "function_name", "fn_name", "entry_point"):
+        if meta.get(k):
+            return meta[k]
+    starter = problem.get("starter_code") or ""
+    m = re.search(r"def\s+(\w+)\s*\(", starter)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def run_tests_livecodebench(code: str, problem: dict, timeout: int = 30) -> tuple[bool, str]:
+    """Run a LCB functional-test problem via a generated harness.
+
+    Each test is `{"input": "<repr of arg1>\\n<repr of arg2>\\n...", "output": "<repr of expected>"}`.
+    We parse each line as JSON, call the entry function (`Solution().{fn}` if a
+    `Solution` class is present, otherwise the top-level `{fn}`), and compare
+    the return value to the JSON-parsed expected output.
+    """
+    import tempfile
+
+    fn_name = _extract_lcb_fn_name(problem)
+    if not fn_name:
+        return False, "no_entry_point"
+    try:
+        tests = json.loads(problem.get("public_test_cases") or "[]")
+    except Exception as e:
+        return False, f"bad_tests: {e}"
+    if not tests:
+        return False, "no_tests"
+
+    harness = (
+        code + "\n\n"
+        "import json as _json, sys as _sys\n"
+        f"_tests = _json.loads({json.dumps(json.dumps(tests))})\n"
+        f"_FN_NAME = {fn_name!r}\n"
+        + _LCB_HARNESS_TAIL
+    )
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
+        tf.write(harness)
+        script_path = tf.name
+    try:
+        proc = subprocess.run(
+            [sys.executable, script_path],
+            timeout=timeout,
+            capture_output=True,
+        )
+        ok = proc.returncode == 0
+        err = proc.stderr.decode("utf-8", errors="ignore")[-500:] if not ok else ""
+        return ok, err
+    except subprocess.TimeoutExpired:
+        return False, "TIMEOUT"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"[:200]
+    finally:
+        try:
+            os.unlink(script_path)
+        except Exception:
+            pass
+
+
+_LCB_HARNESS_TAIL = r"""
+def _resolve_fn():
+    ns = globals()
+    # Prefer class Solution().<fn> — the LeetCode convention.
+    if "Solution" in ns and hasattr(ns["Solution"], _FN_NAME):
+        return getattr(ns["Solution"](), _FN_NAME)
+    if _FN_NAME in ns:
+        return ns[_FN_NAME]
+    raise RuntimeError(f"entry point {_FN_NAME} not found")
+
+def _parse(s):
+    try:
+        return _json.loads(s)
+    except Exception:
+        return s
+
+def _run():
+    fn = _resolve_fn()
+    for i, t in enumerate(_tests):
+        lines = [ln for ln in t["input"].splitlines() if ln.strip() != ""]
+        args = [_parse(ln) for ln in lines]
+        expected = _parse(t["output"])
+        result = fn(*args)
+        # Permit float tolerance and list-of-lists equality via JSON round-trip
+        if _json.dumps(result, sort_keys=True) != _json.dumps(expected, sort_keys=True):
+            raise AssertionError(
+                f"test {i}: expected {expected!r}, got {result!r}"
+            )
+
+_run()
+"""
+
 
 def run_tests(code: str, test_code: str, entry_point: str, timeout: int = 30) -> tuple[bool, str]:
     """Run the model's code + the benchmark test suite in a fresh Python subprocess.
@@ -282,9 +443,20 @@ def main():
     p.add_argument("--tokenizer", default="Qwen/Qwen3.6-35B-A3B",
                    help="HF tokenizer id for counting think tokens.")
 
-    p.add_argument("--dataset", choices=["humaneval", "mbpp"], default="humaneval")
+    p.add_argument("--dataset", choices=["humaneval", "mbpp", "livecodebench"],
+                   default="humaneval")
     p.add_argument("--n-problems", type=int, default=30,
                    help="Problems to evaluate (0 = all).")
+
+    # LiveCodeBench-specific filters
+    p.add_argument("--lcb-version", default="release_v5",
+                   help="LiveCodeBench release tag (e.g. release_v4, release_v5).")
+    p.add_argument("--date-cutoff", default="",
+                   help="ISO date; keep LCB problems with contest_date >= this "
+                        "(e.g. 2025-12-01).  Empty = no date filter.")
+    p.add_argument("--platform", default="leetcode",
+                   help="LCB platform filter: leetcode / atcoder / codeforces. "
+                        "Empty string = no platform filter.")
     p.add_argument("--grammar-file", default="fsm_grammar.gbnf")
     p.add_argument("--max-tokens", type=int, default=8192)
     p.add_argument("--timeout", type=int, default=30,
@@ -306,8 +478,11 @@ def main():
     client = make_client(args)
 
     print(f"[1/3] Loading {args.dataset} problems")
-    problems = load_benchmark(args.dataset, args.n_problems)
+    problems = load_benchmark(args.dataset, args.n_problems, args)
     print(f"  {len(problems)} problems")
+    if not problems:
+        print("ERROR: no problems to evaluate after filtering.", file=sys.stderr)
+        sys.exit(1)
 
     print(f"[2/3] Running {'both modes' if args.only == 'both' else args.only}")
     results = []
@@ -317,6 +492,11 @@ def main():
         user_prompt = build_user_prompt(prob, args.dataset)
         entry_point = prob.get("entry_point") or "candidate"
         test_code = prob.get("test", "")
+
+        def _score(code: str) -> tuple[bool, str]:
+            if args.dataset == "livecodebench":
+                return run_tests_livecodebench(code, prob, args.timeout)
+            return run_tests(code, test_code, entry_point, args.timeout)
 
         row = {"task_id": prob["task_id"]}
         t_prob = time.time()
@@ -328,9 +508,7 @@ def main():
                 )
                 free_think = extract_think(free_text)
                 free_code = extract_code(free_text)
-                free_pass, free_err = run_tests(
-                    free_code, test_code, entry_point, args.timeout
-                )
+                free_pass, free_err = _score(free_code)
                 row["free"] = {
                     "pass": free_pass,
                     "err": free_err[:200],
@@ -350,9 +528,7 @@ def main():
                 )
                 fsm_think = extract_think(fsm_text)
                 fsm_code = extract_code(fsm_text)
-                fsm_pass, fsm_err = run_tests(
-                    fsm_code, test_code, entry_point, args.timeout
-                )
+                fsm_pass, fsm_err = _score(fsm_code)
                 row["fsm"] = {
                     "pass": fsm_pass,
                     "err": fsm_err[:200],

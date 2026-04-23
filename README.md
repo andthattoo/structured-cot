@@ -89,6 +89,11 @@ uv run python fsm_vs_free_eval.py --n-problems 164 --max-tokens 8192
 
 # MBPP+
 uv run python fsm_vs_free_eval.py --n-problems 100 --dataset mbpp --max-tokens 8192
+
+# LiveCodeBench, post-cutoff (contamination-clean)
+uv run python fsm_vs_free_eval.py --dataset livecodebench \
+    --date-cutoff 2025-12-01 --platform leetcode \
+    --n-problems 50 --max-tokens 8192
 ```
 
 Each run produces in `fsm_vs_free/`:
@@ -118,7 +123,7 @@ For the FSM experiment, the base-LM architecture doesn't matter much — we're c
 ## Status
 
 - ✅ HumanEval+ full (164 problems): 22× compression, 0pp accuracy loss
-- ⏳ LiveCodeBench post-cutoff (planned)
+- 🧪 LiveCodeBench post-cutoff (script ready; run pending) — the contamination control
 - ⏳ MBPP+ (planned)
 - 🔲 Other domains (math, logic, planning)
 - 🔲 Cross-model transfer (smaller models)
