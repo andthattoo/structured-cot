@@ -2,7 +2,7 @@
 FSM vs. free thinking — zero-training comparison on a code benchmark.
 
 For each problem, run Qwen3.6-35B-A3B (via the local llama.cpp OpenAI-compatible
-server) in two modes:
+server) in multiple modes:
 
   FREE:  standard thinking-mode generation.  Model produces its native verbose
          <think>...</think> followed by an answer.
@@ -10,6 +10,11 @@ server) in two modes:
   FSM :  grammar-constrained generation.  The same model is forced via GBNF to
          emit a compact structured plan inside <think>...</think>, then the
          grammar becomes permissive so the model can write the code freely.
+
+  PROMPT_TERSE:
+         same compact plan format requested in the prompt, but with no grammar
+         constraint.  This controls for "the prompt made it terse" vs.
+         "the grammar made it terse."
 
 We measure:
   - pass@1 on the benchmark's hidden tests
@@ -34,6 +39,9 @@ Usage:
   # Free-only or FSM-only (for debugging)
   uv run python fsm_vs_free_eval.py --only free --n-problems 10
   uv run python fsm_vs_free_eval.py --only fsm  --n-problems 10
+
+  # Run FREE + FSM + PROMPT_TERSE controls
+  uv run python fsm_vs_free_eval.py --only all --n-problems 30
 """
 
 from __future__ import annotations
@@ -45,6 +53,7 @@ import re
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -119,6 +128,25 @@ SYSTEM_PROMPT = (
     "Wrap your final code in a ```python ... ``` fenced block."
 )
 
+PROMPT_TERSE_SYSTEM_PROMPT = (
+    "You are an expert Python programmer.  Think carefully but tersely.  "
+    "Use exactly this thinking format before the final answer:\n"
+    "<think>\n"
+    "GOAL: one short line\n"
+    "APPROACH: one short line\n"
+    "EDGE: one short line\n"
+    "</think>\n\n"
+    "Then write correct, efficient, well-tested code.  "
+    "Wrap your final code in a ```python ... ``` fenced block."
+)
+
+MODE_ORDER = ("free", "fsm", "prompt_terse")
+MODE_LABELS = {
+    "free": "FREE",
+    "fsm": "FSM",
+    "prompt_terse": "PROMPT_TERSE",
+}
+
 
 def build_user_prompt(problem: dict, dataset: str) -> str:
     if dataset == "humaneval":
@@ -174,8 +202,8 @@ def extract_think(text: str) -> str:
     return ""
 
 
-def extract_code(text: str) -> str:
-    """Pull the Python code out of the response.
+def extract_code_with_info(text: str) -> tuple[str, dict]:
+    """Pull the Python code out of the response and record how we found it.
 
     Free-thinking responses often contain MULTIPLE fenced code blocks as
     the model drafts and revises its answer.  The final answer is almost
@@ -191,17 +219,36 @@ def extract_code(text: str) -> str:
     # 1. last fenced block after </think>
     matches = CODE_FENCED_RE.findall(after_think)
     if matches:
-        return matches[-1]
+        return matches[-1], {
+            "extraction_method": "last_fenced_after_think",
+            "extraction_issue": "none",
+        }
     # 2. last fenced block anywhere
     matches = CODE_FENCED_RE.findall(text)
     if matches:
-        return matches[-1]
+        return matches[-1], {
+            "extraction_method": "last_fenced_anywhere",
+            "extraction_issue": "none",
+        }
     # 3. def ... after </think>
     m = CODE_DEF_RE.search(after_think)
     if m:
-        return m.group(1)
+        return m.group(1), {
+            "extraction_method": "def_after_think",
+            "extraction_issue": "no_fenced_block",
+        }
     # 4. everything after </think>
-    return after_think.strip()
+    code = after_think.strip()
+    return code, {
+        "extraction_method": "after_think_fallback" if code else "empty",
+        "extraction_issue": "no_fenced_block" if code else "empty_code",
+    }
+
+
+def extract_code(text: str) -> str:
+    """Backward-compatible code-only extractor."""
+    code, _ = extract_code_with_info(text)
+    return code
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +391,7 @@ def run_tests(code: str, test_code: str, entry_point: str, timeout: int = 30) ->
     Linux's argv limit (Errno 7 / E2BIG, ~128 KB).
     """
     import tempfile
-    full = f"{code}\n\n{test_code}\n\ntry:\n    check({entry_point})\nexcept NameError:\n    pass\n"
+    full = f"{code}\n\n{test_code}\n\ncheck({entry_point})\n"
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
         tf.write(full)
         script_path = tf.name
@@ -366,6 +413,49 @@ def run_tests(code: str, test_code: str, entry_point: str, timeout: int = 30) ->
             os.unlink(script_path)
         except Exception:
             pass
+
+
+def _entry_point_found(code: str, dataset: str, entry_point: str, problem: dict) -> bool:
+    """Best-effort static check for whether extracted code exposes the target API."""
+    if not code.strip():
+        return False
+    if dataset == "livecodebench":
+        fn_name = _extract_lcb_fn_name(problem)
+        if not fn_name:
+            return False
+        if re.search(r"^\s*class\s+Solution\b", code, re.MULTILINE):
+            return True
+        return bool(re.search(rf"^\s*def\s+{re.escape(fn_name)}\s*\(", code, re.MULTILINE))
+    return bool(re.search(rf"^\s*def\s+{re.escape(entry_point)}\s*\(", code, re.MULTILINE))
+
+
+def classify_failure(result: dict) -> str:
+    """Bucket non-passes into extraction, generation, syntax, and runtime causes."""
+    if result.get("pass") is True:
+        return "pass"
+    if result.get("err", "").startswith("gen_error:"):
+        return "generation_error"
+    if result.get("extraction_issue") == "empty_code":
+        return "extraction_empty_code"
+
+    err = result.get("err") or ""
+    if err == "TIMEOUT":
+        return "timeout"
+    if "SyntaxError" in err or "IndentationError" in err:
+        return "syntax_error"
+    if "entry point" in err and "not found" in err:
+        return "missing_entry_point"
+    if result.get("entry_point_found") is False:
+        return "missing_entry_point"
+    if "AssertionError" in err:
+        return "wrong_answer"
+    if "TypeError" in err:
+        return "type_error"
+    if "NameError" in err:
+        return "runtime_name_error"
+    if err:
+        return "runtime_error"
+    return "unknown_failure"
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +503,22 @@ def generate_free(client, model: str, user_prompt: str, max_tokens: int) -> tupl
     return text, completion_tokens
 
 
+def generate_prompt_terse(client, model: str, user_prompt: str, max_tokens: int) -> tuple[str, int]:
+    """Prompt-only terse structured thinking — no grammar constraint."""
+    r = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": PROMPT_TERSE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=max_tokens,
+        temperature=0.0,
+    )
+    text = r.choices[0].message.content or ""
+    completion_tokens = r.usage.completion_tokens if r.usage else count_tokens(text, model)
+    return text, completion_tokens
+
+
 def generate_fsm(client, model: str, user_prompt: str, grammar: str, max_tokens: int) -> tuple[str, int]:
     """Chat completion with GBNF grammar applied to the whole assistant response."""
     r = client.chat.completions.create(
@@ -428,6 +534,138 @@ def generate_fsm(client, model: str, user_prompt: str, grammar: str, max_tokens:
     text = r.choices[0].message.content or ""
     completion_tokens = r.usage.completion_tokens if r.usage else count_tokens(text, model)
     return text, completion_tokens
+
+
+def modes_to_run(only: str) -> list[str]:
+    if only == "both":
+        return ["free", "fsm"]
+    if only == "all":
+        return list(MODE_ORDER)
+    return [only]
+
+
+def _pass(row: dict, mode: str) -> Optional[bool]:
+    return row.get(mode, {}).get("pass") if mode in row else None
+
+
+def _bucket(task_ids: list[str]) -> dict:
+    return {"count": len(task_ids), "task_ids": task_ids}
+
+
+def _ids(results: list[dict], pred) -> list[str]:
+    return [r["task_id"] for r in results if pred(r)]
+
+
+def build_outcome_breakdown(results: list[dict]) -> dict:
+    """Count pass-set overlaps for the core pair and prompt-only control."""
+    out: dict = {}
+
+    pair_rows = [r for r in results if "free" in r and "fsm" in r]
+    if pair_rows:
+        out["free_vs_fsm"] = {
+            "n": len(pair_rows),
+            "both_pass": _bucket(_ids(pair_rows, lambda r: _pass(r, "free") is True and _pass(r, "fsm") is True)),
+            "both_fail": _bucket(_ids(pair_rows, lambda r: _pass(r, "free") is False and _pass(r, "fsm") is False)),
+            "fsm_only_pass": _bucket(_ids(pair_rows, lambda r: _pass(r, "free") is False and _pass(r, "fsm") is True)),
+            "free_only_pass": _bucket(_ids(pair_rows, lambda r: _pass(r, "free") is True and _pass(r, "fsm") is False)),
+        }
+
+    triple_rows = [r for r in results if all(m in r for m in MODE_ORDER)]
+    if triple_rows:
+        out["prompt_terse_checks"] = {
+            "n": len(triple_rows),
+            "all_pass": _bucket(_ids(triple_rows, lambda r: all(_pass(r, m) is True for m in MODE_ORDER))),
+            "all_fail": _bucket(_ids(triple_rows, lambda r: all(_pass(r, m) is False for m in MODE_ORDER))),
+            "prompt_terse_only_pass": _bucket(
+                _ids(triple_rows, lambda r: _pass(r, "prompt_terse") is True
+                     and _pass(r, "free") is False
+                     and _pass(r, "fsm") is False)
+            ),
+            "prompt_terse_only_fail": _bucket(
+                _ids(triple_rows, lambda r: _pass(r, "prompt_terse") is False
+                     and _pass(r, "free") is True
+                     and _pass(r, "fsm") is True)
+            ),
+            "prompt_terse_matches_free_not_fsm": _bucket(
+                _ids(triple_rows, lambda r: _pass(r, "prompt_terse") == _pass(r, "free")
+                     and _pass(r, "prompt_terse") != _pass(r, "fsm"))
+            ),
+            "prompt_terse_matches_fsm_not_free": _bucket(
+                _ids(triple_rows, lambda r: _pass(r, "prompt_terse") == _pass(r, "fsm")
+                     and _pass(r, "prompt_terse") != _pass(r, "free"))
+            ),
+        }
+
+    return out
+
+
+def build_failure_accounting(results: list[dict], active_modes: list[str]) -> dict:
+    out: dict = {}
+    for mode in active_modes:
+        rows = [r[mode] for r in results if mode in r]
+        failure_types = Counter(r.get("failure_type", "unknown_failure") for r in rows if not r.get("pass"))
+        extraction_methods = Counter(r.get("extraction_method", "unknown") for r in rows)
+        extraction_issues = Counter(
+            r.get("extraction_issue", "unknown") for r in rows
+            if r.get("extraction_issue", "none") != "none"
+        )
+        out[mode] = {
+            "n": len(rows),
+            "passes": sum(1 for r in rows if r.get("pass")),
+            "failures": sum(1 for r in rows if not r.get("pass")),
+            "failure_types": dict(failure_types),
+            "extraction_methods": dict(extraction_methods),
+            "extraction_issues": dict(extraction_issues),
+        }
+    return out
+
+
+def _format_ids(task_ids: list[str], limit: int = 16) -> str:
+    if not task_ids:
+        return "-"
+    shown = ", ".join(str(t) for t in task_ids[:limit])
+    if len(task_ids) > limit:
+        shown += f", ... (+{len(task_ids) - limit})"
+    return shown
+
+
+def _format_counts(counts: dict) -> str:
+    if not counts:
+        return "-"
+    return ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+
+
+def print_outcome_breakdown(breakdown: dict) -> None:
+    if "free_vs_fsm" in breakdown:
+        print("\n  Pass-set overlap (FREE vs FSM)")
+        for key in ("both_pass", "both_fail", "fsm_only_pass", "free_only_pass"):
+            b = breakdown["free_vs_fsm"][key]
+            print(f"    {key:<18s} {b['count']:>3d}  {_format_ids(b['task_ids'])}")
+
+    if "prompt_terse_checks" in breakdown:
+        print("\n  PROMPT_TERSE checks")
+        for key in (
+            "all_pass",
+            "all_fail",
+            "prompt_terse_only_pass",
+            "prompt_terse_only_fail",
+            "prompt_terse_matches_free_not_fsm",
+            "prompt_terse_matches_fsm_not_free",
+        ):
+            b = breakdown["prompt_terse_checks"][key]
+            print(f"    {key:<34s} {b['count']:>3d}  {_format_ids(b['task_ids'])}")
+
+
+def print_failure_accounting(accounting: dict) -> None:
+    if not accounting:
+        return
+    print("\n  Failure / extraction accounting")
+    for mode in MODE_ORDER:
+        if mode not in accounting:
+            continue
+        a = accounting[mode]
+        print(f"    {MODE_LABELS[mode]:<13s} failures: {a['failures']:>3d}  {_format_counts(a['failure_types'])}")
+        print(f"    {'':<13s} extraction issues: {_format_counts(a['extraction_issues'])}")
 
 
 # ---------------------------------------------------------------------------
@@ -462,18 +700,21 @@ def main():
     p.add_argument("--timeout", type=int, default=30,
                    help="Per-test execution timeout (seconds).")
 
-    p.add_argument("--only", choices=["both", "free", "fsm"], default="both",
-                   help="Run one mode only (for debugging).")
+    p.add_argument("--only", choices=["both", "all", "free", "fsm", "prompt_terse"], default="both",
+                   help="'both' = FREE+FSM, 'all' = FREE+FSM+PROMPT_TERSE, or run one mode only.")
     p.add_argument("--request-timeout", type=float, default=600.0,
                    help="Per-request HTTP timeout in seconds. Hard-stops stuck calls.")
     p.add_argument("--out-dir", default="fsm_vs_free")
     args = p.parse_args()
 
-    try:
-        grammar = Path(args.grammar_file).read_text()
-    except Exception as e:
-        print(f"ERROR: could not read grammar file {args.grammar_file}: {e}", file=sys.stderr)
-        sys.exit(1)
+    active_modes = modes_to_run(args.only)
+    grammar = ""
+    if "fsm" in active_modes:
+        try:
+            grammar = Path(args.grammar_file).read_text()
+        except Exception as e:
+            print(f"ERROR: could not read grammar file {args.grammar_file}: {e}", file=sys.stderr)
+            sys.exit(1)
 
     client = make_client(args)
 
@@ -484,7 +725,8 @@ def main():
         print("ERROR: no problems to evaluate after filtering.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[2/3] Running {'both modes' if args.only == 'both' else args.only}")
+    mode_names = ", ".join(MODE_LABELS[m] for m in active_modes)
+    print(f"[2/3] Running {mode_names}")
     results = []
     t_start = time.time()
 
@@ -501,45 +743,44 @@ def main():
         row = {"task_id": prob["task_id"]}
         t_prob = time.time()
 
-        if args.only in ("both", "free"):
-            try:
-                free_text, free_total_tokens = generate_free(
-                    client, args.model, user_prompt, args.max_tokens
-                )
-                free_think = extract_think(free_text)
-                free_code = extract_code(free_text)
-                free_pass, free_err = _score(free_code)
-                row["free"] = {
-                    "pass": free_pass,
-                    "err": free_err[:200],
-                    "think_tokens": count_tokens(free_think, args.tokenizer),
-                    "total_tokens": int(free_total_tokens),
-                    "raw_response": free_text,
-                    "extracted_think": free_think[:500],
-                    "extracted_code": free_code[:500],
-                }
-            except Exception as e:
-                row["free"] = {"pass": False, "err": f"gen_error: {e}"[:300]}
+        def _generate(mode: str) -> tuple[str, int]:
+            if mode == "free":
+                return generate_free(client, args.model, user_prompt, args.max_tokens)
+            if mode == "fsm":
+                return generate_fsm(client, args.model, user_prompt, grammar, args.max_tokens)
+            if mode == "prompt_terse":
+                return generate_prompt_terse(client, args.model, user_prompt, args.max_tokens)
+            raise ValueError(mode)
 
-        if args.only in ("both", "fsm"):
+        for mode in active_modes:
             try:
-                fsm_text, fsm_total_tokens = generate_fsm(
-                    client, args.model, user_prompt, grammar, args.max_tokens
-                )
-                fsm_think = extract_think(fsm_text)
-                fsm_code = extract_code(fsm_text)
-                fsm_pass, fsm_err = _score(fsm_code)
-                row["fsm"] = {
-                    "pass": fsm_pass,
-                    "err": fsm_err[:200],
-                    "think_tokens": count_tokens(fsm_think, args.tokenizer),
-                    "total_tokens": int(fsm_total_tokens),
-                    "raw_response": fsm_text,
-                    "extracted_think": fsm_think[:500],
-                    "extracted_code": fsm_code[:500],
+                text, total_tokens = _generate(mode)
+                think = extract_think(text)
+                code, extraction = extract_code_with_info(text)
+                passed, err = _score(code)
+                result = {
+                    "pass": passed,
+                    "err": err[:200],
+                    "think_tokens": count_tokens(think, args.tokenizer),
+                    "total_tokens": int(total_tokens),
+                    "raw_response": text,
+                    "extracted_think": think[:500],
+                    "extracted_code": code[:500],
+                    **extraction,
+                    "entry_point_found": _entry_point_found(code, args.dataset, entry_point, prob),
                 }
+                result["failure_type"] = classify_failure(result)
+                row[mode] = result
             except Exception as e:
-                row["fsm"] = {"pass": False, "err": f"gen_error: {e}"[:300]}
+                result = {
+                    "pass": False,
+                    "err": f"gen_error: {e}"[:300],
+                    "failure_type": "generation_error",
+                    "extraction_method": "not_run",
+                    "extraction_issue": "generation_error",
+                    "entry_point_found": False,
+                }
+                row[mode] = result
 
         dt = time.time() - t_prob
         results.append(row)
@@ -547,18 +788,19 @@ def main():
         def tag(d): return "✓" if d and d.get("pass") else "✗"
         def tt(d):  return d.get("think_tokens", "-") if d else "-"
         err_bits = []
-        for m in ("free", "fsm"):
+        for m in active_modes:
             d = row.get(m)
             if d and not d.get("pass"):
                 e = (d.get("err") or "").strip()
                 if e:
                     err_bits.append(f"{m}: {e[:80]}")
         err_str = ("  |  " + " ; ".join(err_bits)) if err_bits else ""
+        status_str = "   ".join(
+            f"{m}={tag(row.get(m))} ({tt(row.get(m))}tt)" for m in active_modes
+        )
         print(
             f"  [{i+1}/{len(problems)}] {prob['task_id']:<16s}  "
-            f"free={tag(row.get('free'))} ({tt(row.get('free'))}tt)   "
-            f"fsm={tag(row.get('fsm'))}  ({tt(row.get('fsm'))}tt)  "
-            f"{dt:.0f}s{err_str}"
+            f"{status_str}  {dt:.0f}s{err_str}"
         )
 
     elapsed = time.time() - t_start
@@ -567,31 +809,44 @@ def main():
     def mean(xs):
         return sum(xs) / max(len(xs), 1)
 
-    free_rows = [r["free"] for r in results if "free" in r and r["free"].get("pass") is not None]
-    fsm_rows = [r["fsm"]  for r in results if "fsm"  in r and r["fsm"].get("pass")  is not None]
+    mode_rows = {
+        mode: [r[mode] for r in results if mode in r and r[mode].get("pass") is not None]
+        for mode in active_modes
+    }
+    mode_summaries: dict = {}
 
     print(f"\n[3/3] Summary  (n={len(results)}, elapsed={elapsed:.0f}s)")
     print("  " + "-" * 70)
-    if free_rows:
-        free_pass_rate = mean([1.0 if r["pass"] else 0.0 for r in free_rows])
-        free_think_mean = mean([r.get("think_tokens", 0) for r in free_rows])
-        free_total_mean = mean([r.get("total_tokens", 0) for r in free_rows])
-        print(f"  FREE  :  pass@1 = {free_pass_rate*100:5.1f}%   "
-              f"mean think = {free_think_mean:6.0f} tok   "
-              f"mean total = {free_total_mean:6.0f} tok")
-    if fsm_rows:
-        fsm_pass_rate = mean([1.0 if r["pass"] else 0.0 for r in fsm_rows])
-        fsm_think_mean = mean([r.get("think_tokens", 0) for r in fsm_rows])
-        fsm_total_mean = mean([r.get("total_tokens", 0) for r in fsm_rows])
-        print(f"  FSM   :  pass@1 = {fsm_pass_rate*100:5.1f}%   "
-              f"mean think = {fsm_think_mean:6.0f} tok   "
-              f"mean total = {fsm_total_mean:6.0f} tok")
-    if free_rows and fsm_rows:
-        acc_delta = (fsm_pass_rate - free_pass_rate) * 100
-        compression = free_think_mean / max(fsm_think_mean, 1)
+    for mode in active_modes:
+        rows = mode_rows[mode]
+        if not rows:
+            continue
+        pass_rate = mean([1.0 if r["pass"] else 0.0 for r in rows])
+        think_mean = mean([r.get("think_tokens", 0) for r in rows])
+        total_mean = mean([r.get("total_tokens", 0) for r in rows])
+        mode_summaries[mode] = {
+            "pass_rate": pass_rate,
+            "think_tokens_mean": think_mean,
+            "total_tokens_mean": total_mean,
+        }
+        print(f"  {MODE_LABELS[mode]:<13s}:  pass@1 = {pass_rate*100:5.1f}%   "
+              f"mean think = {think_mean:6.0f} tok   "
+              f"mean total = {total_mean:6.0f} tok")
+
+    if "free" in mode_summaries and "fsm" in mode_summaries:
+        acc_delta = (mode_summaries["fsm"]["pass_rate"] - mode_summaries["free"]["pass_rate"]) * 100
+        compression = (
+            mode_summaries["free"]["think_tokens_mean"]
+            / max(mode_summaries["fsm"]["think_tokens_mean"], 1)
+        )
         print("  " + "-" * 70)
         print(f"  Accuracy delta (FSM − FREE): {acc_delta:+5.1f} pp")
         print(f"  Think-token compression    : {compression:5.2f}×")
+
+    outcome_breakdown = build_outcome_breakdown(results)
+    failure_accounting = build_failure_accounting(results, active_modes)
+    print_outcome_breakdown(outcome_breakdown)
+    print_failure_accounting(failure_accounting)
 
     # ---- Save ----
     out = Path(args.out_dir)
@@ -601,21 +856,14 @@ def main():
     )
     summary = {
         "args": vars(args),
+        "modes": active_modes,
         "n": len(results),
         "elapsed_sec": elapsed,
     }
-    if free_rows:
-        summary["free"] = {
-            "pass_rate": free_pass_rate,
-            "think_tokens_mean": free_think_mean,
-            "total_tokens_mean": free_total_mean,
-        }
-    if fsm_rows:
-        summary["fsm"] = {
-            "pass_rate": fsm_pass_rate,
-            "think_tokens_mean": fsm_think_mean,
-            "total_tokens_mean": fsm_total_mean,
-        }
+    for mode, mode_summary in mode_summaries.items():
+        summary[mode] = mode_summary
+    summary["outcome_breakdown"] = outcome_breakdown
+    summary["failure_accounting"] = failure_accounting
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     _write_per_problem_report(out / "per_problem.md", results, problems, args)
     print(f"\nSaved → {out / 'results.jsonl'}")
@@ -626,15 +874,39 @@ def main():
 def _outcome_tag(row: dict) -> str:
     f = row.get("free", {}).get("pass") if "free" in row else None
     s = row.get("fsm",  {}).get("pass") if "fsm"  in row else None
-    if f is True  and s is True:  return "🟰 both pass"
-    if f is True  and s is False: return "🔻 FSM regression"
-    if f is False and s is True:  return "🔺 FSM wins"
-    if f is False and s is False: return "❌ both fail"
-    if f is True  and s is None:  return "free only: ✓"
-    if f is False and s is None:  return "free only: ✗"
-    if f is None  and s is True:  return "fsm only: ✓"
-    if f is None  and s is False: return "fsm only: ✗"
-    return "—"
+    p = row.get("prompt_terse", {}).get("pass") if "prompt_terse" in row else None
+
+    if p is True and f is False and s is False:
+        return "🟡 PROMPT_TERSE-only pass"
+    if p is False and f is True and s is True:
+        return "🟠 PROMPT_TERSE-only fail"
+
+    if f is True and s is True:
+        base = "🟰 both pass"
+    elif f is True and s is False:
+        base = "🔻 FSM regression"
+    elif f is False and s is True:
+        base = "🔺 FSM wins"
+    elif f is False and s is False:
+        base = "❌ both fail"
+    elif f is True and s is None:
+        base = "free only: ✓"
+    elif f is False and s is None:
+        base = "free only: ✗"
+    elif f is None and s is True:
+        base = "fsm only: ✓"
+    elif f is None and s is False:
+        base = "fsm only: ✗"
+    elif p is True:
+        base = "prompt_terse only: ✓"
+    elif p is False:
+        base = "prompt_terse only: ✗"
+    else:
+        return "—"
+
+    if p is not None and f is not None and s is not None:
+        base += f"; prompt_terse={'✓' if p else '✗'}"
+    return base
 
 
 def _write_per_problem_report(path: Path, results: list, problems: list, args) -> None:
@@ -642,12 +914,16 @@ def _write_per_problem_report(path: Path, results: list, problems: list, args) -
     prob_by_id = {p["task_id"]: p for p in problems}
     lines: list[str] = []
 
-    lines.append(f"# Per-problem FSM vs Free — {args.dataset}, n={len(results)}\n")
+    modes_present = [m for m in MODE_ORDER if any(m in r for r in results)]
+    mode_names = ", ".join(MODE_LABELS[m] for m in modes_present)
+    lines.append(f"# Per-problem mode comparison — {args.dataset}, n={len(results)}\n")
     lines.append(f"**Model:** `{args.model}`  ")
+    lines.append(f"**Modes:** {mode_names}  ")
     lines.append(f"**Max tokens:** {args.max_tokens}  ")
     lines.append(f"**Grammar:** `{args.grammar_file}`  \n")
     lines.append("Outcome legend: 🔺 FSM wins on a problem FREE got wrong · "
-                 "🔻 FSM regresses vs FREE · 🟰 both pass · ❌ both fail.\n")
+                 "🔻 FSM regresses vs FREE · 🟰 both pass · ❌ both fail · "
+                 "🟡/🟠 PROMPT_TERSE-only divergence.\n")
     lines.append("---\n")
 
     for row in results:
@@ -655,7 +931,7 @@ def _write_per_problem_report(path: Path, results: list, problems: list, args) -
         prob = prob_by_id.get(tid, {})
         lines.append(f"## {tid} — {_outcome_tag(row)}\n")
 
-        prompt = prob.get("prompt", "")
+        prompt = prob.get("prompt") or prob.get("question_content", "")
         if prompt:
             snippet = prompt.strip()
             if len(snippet) > 400:
@@ -669,6 +945,17 @@ def _write_per_problem_report(path: Path, results: list, problems: list, args) -
             out_ = [f"### {name}  {'✓ pass' if d.get('pass') else '✗ fail'}  "
                     f"(think: {d.get('think_tokens','-')} tok, "
                     f"total: {d.get('total_tokens','-')} tok)\n"]
+            meta = []
+            if d.get("failure_type") and d.get("failure_type") != "pass":
+                meta.append(f"failure: `{d['failure_type']}`")
+            if d.get("extraction_issue") and d.get("extraction_issue") != "none":
+                meta.append(f"extraction: `{d['extraction_issue']}`")
+            if d.get("extraction_method"):
+                meta.append(f"method: `{d['extraction_method']}`")
+            if d.get("entry_point_found") is False:
+                meta.append("entry point: `not found`")
+            if meta:
+                out_.append("_meta:_ " + " · ".join(meta) + "\n")
             if d.get("err"):
                 out_.append("_error:_")
                 out_.append("```text")
@@ -686,10 +973,9 @@ def _write_per_problem_report(path: Path, results: list, problems: list, args) -
                 out_.append("```\n")
             return out_
 
-        if "free" in row:
-            lines.extend(_section("FREE", row["free"]))
-        if "fsm" in row:
-            lines.extend(_section("FSM",  row["fsm"]))
+        for mode in MODE_ORDER:
+            if mode in row:
+                lines.extend(_section(MODE_LABELS[mode], row[mode]))
 
         # Per-problem compression (if both ran)
         f = row.get("free", {})
