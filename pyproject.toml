@@ -1,0 +1,33 @@
+[project]
+name = "structured-cot"
+version = "0.1.0"
+description = "Grammar-constrained chain-of-thought for reasoning LMs. Zero training, 22× compression with no accuracy loss on HumanEval+."
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "huggingface_hub>=0.25",
+    "datasets>=3.0",
+    "sentencepiece",
+    "protobuf",
+    "numpy",
+    "llama-cpp-python[server]>=0.3",
+    "openai>=1.0",
+    "transformers>=4.45",
+    # CUDA 12 runtime — llama-cpp-python prebuilt wheels link libcudart.so.12
+    # but modern torch brings cu13 by default.  Pinning cu12 alongside keeps
+    # both happy on the same system.
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cublas-cu12",
+    "nvidia-cuda-nvrtc-cu12",
+]
+
+# Pull the CUDA 12.4 prebuilt llama-cpp-python wheels so we skip the CUDA compile.
+# If this fails on your box, drop the tool.uv.* blocks below and build from source:
+#   CMAKE_ARGS='-DGGML_CUDA=on' uv pip install llama-cpp-python --no-binary llama-cpp-python
+[[tool.uv.index]]
+name = "llama-cpp-cu124"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+llama-cpp-python = { index = "llama-cpp-cu124" }

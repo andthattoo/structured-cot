@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.venv/
+venv/
+env/
+
+# Eval outputs
+fsm_vs_free/
+*.jsonl
+
+# Model cache
+*.gguf
+models/
+
+# Server logs
+server.log
+server.pid
+nohup.out
+
+# tmux
+.tmux.conf.local
