@@ -195,6 +195,7 @@ CODE_START_RE = re.compile(
     re.MULTILINE,
 )
 OPENING_FENCE_RE = re.compile(r"^```(?:python|py)?[ \t\r]*\n?", re.IGNORECASE)
+OPENING_FENCE_ANYWHERE_RE = re.compile(r"```(?:python|py)?[ \t\r]*\n?", re.IGNORECASE)
 
 
 def _strip_unmatched_fence(code: str) -> str:
@@ -239,8 +240,9 @@ def extract_code_with_info(text: str) -> tuple[str, dict]:
     Priority:
       1. Last ```python fenced block after </think>
       2. Last fenced block anywhere
-      3. The first 'def ...' block after </think>
-      4. Everything after </think> (last resort)
+      3. Unterminated ```python fenced block
+      4. First code-looking block after prose
+      5. Empty code if no code-like block can be found
     """
     after_think = text.split("</think>", 1)[-1] if "</think>" in text else text
 
@@ -266,6 +268,13 @@ def extract_code_with_info(text: str) -> tuple[str, dict]:
             "extraction_issue": "unterminated_fence",
         }
 
+    m = OPENING_FENCE_ANYWHERE_RE.search(after_think)
+    if m:
+        return _strip_unmatched_fence(after_think[m.end():]), {
+            "extraction_method": "opening_fence_anywhere",
+            "extraction_issue": "prose_before_unterminated_fence",
+        }
+
     # 4. code-looking block after prose/imports/classes
     m = CODE_START_RE.search(after_think)
     if m:
@@ -282,11 +291,10 @@ def extract_code_with_info(text: str) -> tuple[str, dict]:
             "extraction_method": "def_after_think",
             "extraction_issue": "no_fenced_block",
         }
-    # 6. everything after </think>
-    code = _strip_unmatched_fence(after_think)
-    return code, {
-        "extraction_method": "after_think_fallback" if code else "empty",
-        "extraction_issue": "no_fenced_block" if code else "empty_code",
+    # 6. No runnable-looking code found.  Do not execute prose as Python.
+    return "", {
+        "extraction_method": "empty",
+        "extraction_issue": "empty_code",
     }
 
 
