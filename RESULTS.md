@@ -142,8 +142,8 @@ The repo now keeps three LiveCodeBench grammar variants:
 - `fsm_grammar_lcb_plan.gbnf`: richer `GOAL/STATE/ALGO/EDGE/VERIFY` plan, permissive answer region.
 - `fsm_grammar_lcb_fenced.gbnf`: richer plan plus exactly one fenced Python block; comments allowed, backticks disallowed.
 - `fsm_grammar_lcb_no_comments.gbnf`: richer plan, permissive answer region, but no `#` comments or backticks.
-- `fsm_grammar_lcb_bounded_no_comments.gbnf`: richer plan, each planning line capped at 240 characters, no `#` comments or backticks.
-- `fsm_grammar_lcb_code_start_bounded.gbnf`: bounded no-comments grammar whose answer must start with `from`, `import`, `class`, or `def`.
+- `fsm_grammar_lcb_bounded_no_comments.gbnf`: richer plan, no `#` comments or backticks. Despite the historical filename, this is now parse-safe and does not use `{m,n}` line bounds.
+- `fsm_grammar_lcb_code_start_bounded.gbnf`: no-comments grammar whose answer must start with `from`, `import`, `class`, or `def`. Despite the historical filename, this is now parse-safe and does not use `{m,n}` line bounds.
 - `fsm_grammar_lcb.gbnf`: strictest version; one fenced Python block, no `#` comments, no backticks.
 
 Early 10-problem `fsm_grammar_lcb_fenced.gbnf` run:
@@ -177,7 +177,7 @@ Shared rollouts reveal two separate displacement channels:
 - Comment displacement: `3562` produced 217 comment lines and 4050 comment tokens, then failed with an indentation error. This is the pure `#`-scratchpad pathology.
 - Field stuffing: `3684` passed, but spent 2175 think tokens because the grammar allowed arbitrarily long `GOAL/STATE/ALGO/EDGE/VERIFY` lines.
 
-The bounded no-comments grammar targets both: it removes comments/backticks in the answer and caps each planning line at 240 characters using GBNF repetition ranges.
+The no-comments grammar removes comments/backticks in the answer. An attempted bounded-line version used GBNF `{m,n}` repetition ranges, but the deployed llama.cpp parser rejected that syntax, so the current checked-in grammars use parse-safe unbounded lines.
 
 Initial 10-problem `fsm_grammar_lcb_bounded_no_comments.gbnf` run:
 
@@ -263,7 +263,7 @@ uv run python fsm_vs_free_eval.py --dataset livecodebench \
 **Modes**
 
 - `FREE`: standard thinking-mode generation with the shared system prompt.
-- `FSM`: same user prompt, but the server receives a GBNF grammar. The default `fsm_grammar.gbnf` forces `<think>` to contain exactly `GOAL`, `APPROACH`, and `EDGE` lines before unconstrained code. The LiveCodeBench variants use `GOAL/STATE/ALGO/EDGE/VERIFY`, with separate permissive, no-comments, bounded-line, code-start, fenced, and strict answer-channel constraints.
+- `FSM`: same user prompt, but the server receives a GBNF grammar. The default `fsm_grammar.gbnf` forces `<think>` to contain exactly `GOAL`, `APPROACH`, and `EDGE` lines before unconstrained code. The LiveCodeBench variants use `GOAL/STATE/ALGO/EDGE/VERIFY`, with separate permissive, no-comments, code-start, fenced, and strict answer-channel constraints.
 - `PROMPT_TERSE`: no grammar; the system prompt merely asks the model to use the same `GOAL/APPROACH/EDGE` thinking format.
 
 **Test execution** — each generated code block is combined with the benchmark's `test` body and `entry_point`, written to a temp file, and executed via `python $FILE` in a subprocess with a 30s timeout. The harness calls `check(entry_point)` directly. Missing functions and undefined names now fail normally.

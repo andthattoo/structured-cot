@@ -1,13 +1,16 @@
-# Richer LiveCodeBench plan with bounded planning lines and forced code start.
+# Richer LiveCodeBench plan with forced code start.
 # The answer must begin with a Python-looking start token and cannot contain
 # comments/backticks. This blocks language labels ("python") and raw prose
 # before code without forcing a markdown fence.
+#
+# Note: this was originally a bounded-line grammar, but the deployed
+# llama.cpp GBNF parser rejects {m,n} repetition ranges. Keep rules parse-safe.
 #
 # Each rule MUST be on a single line for llama.cpp's GBNF parser.
 
 root ::= think code
 think ::= "<think>\n" "GOAL: " line "STATE: " line "ALGO: " line "EDGE: " line "VERIFY: " line "</think>\n\n"
-line ::= [^\n]{1,240} "\n"
+line ::= [^\n]+ "\n"
 code ::= code_start code_rest
 code_start ::= "from " | "import " | "class " | "def "
 code_rest ::= [\x09\x0A\x0D\x20-\x22\x24-\x5F\x61-\x7E]+
