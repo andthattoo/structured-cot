@@ -142,6 +142,7 @@ The repo now keeps three LiveCodeBench grammar variants:
 - `fsm_grammar_lcb_plan.gbnf`: richer `GOAL/STATE/ALGO/EDGE/VERIFY` plan, permissive answer region.
 - `fsm_grammar_lcb_fenced.gbnf`: richer plan plus exactly one fenced Python block; comments allowed, backticks disallowed.
 - `fsm_grammar_lcb_no_comments.gbnf`: richer plan, permissive answer region, but no `#` comments or backticks.
+- `fsm_grammar_lcb_bounded_no_comments.gbnf`: richer plan, each planning line capped at 240 characters, no `#` comments or backticks.
 - `fsm_grammar_lcb.gbnf`: strictest version; one fenced Python block, no `#` comments, no backticks.
 
 Early 10-problem `fsm_grammar_lcb_fenced.gbnf` run:
@@ -169,6 +170,13 @@ Early 10-problem `fsm_grammar_lcb_plan.gbnf` run after the harness/comment-metri
 | comment bloat | 4 / 10 |
 
 This is a much better accuracy signal than the fenced/strict variants, but it is not a compression win. The model still moves most of its deliberation into the answer channel, mostly as Python comments. The next useful ablation is therefore `fsm_grammar_lcb_no_comments.gbnf`: keep the richer five-field plan, do not force a fence, but remove the `#` comment escape hatch.
+
+Shared rollouts reveal two separate displacement channels:
+
+- Comment displacement: `3562` produced 217 comment lines and 4050 comment tokens, then failed with an indentation error. This is the pure `#`-scratchpad pathology.
+- Field stuffing: `3684` passed, but spent 2175 think tokens because the grammar allowed arbitrarily long `GOAL/STATE/ALGO/EDGE/VERIFY` lines.
+
+The bounded no-comments grammar targets both: it removes comments/backticks in the answer and caps each planning line at 240 characters using GBNF repetition ranges.
 
 For LiveCodeBench, useful reporting should include:
 
@@ -217,6 +225,12 @@ uv run python fsm_vs_free_eval.py --dataset livecodebench \
   --n-problems 50 --max-tokens 8192 --only fsm \
   --grammar-file fsm_grammar_lcb_no_comments.gbnf \
   --out-dir lcb_v6_2025_01_01_fsm_lcb_no_comments
+
+uv run python fsm_vs_free_eval.py --dataset livecodebench \
+  --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
+  --n-problems 50 --max-tokens 8192 --only fsm \
+  --grammar-file fsm_grammar_lcb_bounded_no_comments.gbnf \
+  --out-dir lcb_v6_2025_01_01_fsm_lcb_bounded_no_comments
 ```
 
 ## Methodology notes
@@ -224,7 +238,7 @@ uv run python fsm_vs_free_eval.py --dataset livecodebench \
 **Modes**
 
 - `FREE`: standard thinking-mode generation with the shared system prompt.
-- `FSM`: same user prompt, but the server receives a GBNF grammar. The default `fsm_grammar.gbnf` forces `<think>` to contain exactly `GOAL`, `APPROACH`, and `EDGE` lines before unconstrained code. The LiveCodeBench variants use `GOAL/STATE/ALGO/EDGE/VERIFY`, with separate permissive, no-comments, fenced, and strict answer-channel constraints.
+- `FSM`: same user prompt, but the server receives a GBNF grammar. The default `fsm_grammar.gbnf` forces `<think>` to contain exactly `GOAL`, `APPROACH`, and `EDGE` lines before unconstrained code. The LiveCodeBench variants use `GOAL/STATE/ALGO/EDGE/VERIFY`, with separate permissive, no-comments, bounded-line, fenced, and strict answer-channel constraints.
 - `PROMPT_TERSE`: no grammar; the system prompt merely asks the model to use the same `GOAL/APPROACH/EDGE` thinking format.
 
 **Test execution** — each generated code block is combined with the benchmark's `test` body and `entry_point`, written to a temp file, and executed via `python $FILE` in a subprocess with a 30s timeout. The harness calls `check(entry_point)` directly. Missing functions and undefined names now fail normally.
@@ -249,7 +263,7 @@ uv run python fsm_vs_free_eval.py --dataset livecodebench \
 
 1. **LiveCodeBench post-release subset.** For Qwen3.6, use `contest_date >= 2026-04-23` as the strict cutoff. If that yields too few problems, also run `contest_date >= 2026-03-01` and label it as recent-but-risky rather than clean.
 2. **Measure reasoning displacement.** Use the new `post_think_tokens` and `answer_channel_bloat` metrics to compare LiveCodeBench grammar variants.
-3. **Richer coding grammar.** Test `fsm_grammar_lcb_plan.gbnf`, `fsm_grammar_lcb_no_comments.gbnf`, `fsm_grammar_lcb_fenced.gbnf`, and `fsm_grammar_lcb.gbnf` against the current `GOAL/APPROACH/EDGE` grammar.
+3. **Richer coding grammar.** Test `fsm_grammar_lcb_plan.gbnf`, `fsm_grammar_lcb_no_comments.gbnf`, `fsm_grammar_lcb_bounded_no_comments.gbnf`, `fsm_grammar_lcb_fenced.gbnf`, and `fsm_grammar_lcb.gbnf` against the current `GOAL/APPROACH/EDGE` grammar.
 4. **MBPP+.** Bigger and messier than HumanEval+, useful as a second coding benchmark.
 5. **Smaller models.** Test whether grammar compression still works when the model has less latent capability.
 6. **Math / logic.** Try the same grammar and domain-specific grammars on GSM8K, MATH/AIME-style tasks, and logic benchmarks.
