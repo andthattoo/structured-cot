@@ -237,6 +237,7 @@ CODE_START_RE = re.compile(
 )
 OPENING_FENCE_RE = re.compile(r"^```(?:python|py)?[ \t\r]*\n?", re.IGNORECASE)
 OPENING_FENCE_ANYWHERE_RE = re.compile(r"```(?:python|py)?[ \t\r]*\n?", re.IGNORECASE)
+LANGUAGE_LABEL_RE = re.compile(r"^\s*(?:python|py)\s*\n", re.IGNORECASE)
 
 
 def _strip_think_tags(text: str) -> str:
@@ -326,6 +327,19 @@ def extract_code_with_info(text: str) -> tuple[str, dict]:
             "extraction_method": "opening_fence_anywhere",
             "extraction_issue": "prose_before_unterminated_fence",
         }
+
+    # Some no-fence grammars still make the model emit a bare language label:
+    # "python\nfrom ...".  Treat that separately from real prose-before-code.
+    label = LANGUAGE_LABEL_RE.match(after_think)
+    if label:
+        after_label = after_think[label.end():]
+        m = CODE_START_RE.search(after_label)
+        if m:
+            issue = "language_label_before_code" if m.start() == 0 else "language_label_then_prose_before_code"
+            return _strip_unmatched_fence(after_label[m.start():]), {
+                "extraction_method": "code_start_after_language_label",
+                "extraction_issue": issue,
+            }
 
     # 4. code-looking block after prose/imports/classes
     m = CODE_START_RE.search(after_think)
