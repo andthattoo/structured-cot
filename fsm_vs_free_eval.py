@@ -188,8 +188,22 @@ def build_user_prompt(problem: dict, dataset: str) -> str:
 
 # Regex for extracting tokens.
 THINK_OPEN_CLOSE_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-CODE_FENCED_RE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
+CODE_FENCED_RE = re.compile(r"```(?:python|py)?[ \t\r]*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 CODE_DEF_RE = re.compile(r"^(def\s+\w+.*?)(?=\n\S|\Z)", re.DOTALL | re.MULTILINE)
+CODE_START_RE = re.compile(
+    r"^(?:from\s+\S+\s+import\s+.+|import\s+.+|class\s+\w+\b.*|def\s+\w+\s*\(.*|@\w+.*)$",
+    re.MULTILINE,
+)
+OPENING_FENCE_RE = re.compile(r"^```(?:python|py)?[ \t\r]*\n?", re.IGNORECASE)
+
+
+def _strip_unmatched_fence(code: str) -> str:
+    """Remove a leading opening fence when the model forgot the closing fence."""
+    code = code.strip()
+    code = OPENING_FENCE_RE.sub("", code, count=1).strip()
+    if code.endswith("```"):
+        code = code[:-3].strip()
+    return code
 
 
 def extract_think(text: str) -> str:
@@ -208,6 +222,9 @@ def extract_think(text: str) -> str:
 
     # No tags.  Thinking is whatever comes before the first fenced code block.
     m = CODE_FENCED_RE.search(text)
+    if m:
+        return text[: m.start()].strip()
+    m = CODE_START_RE.search(text)
     if m:
         return text[: m.start()].strip()
     return ""
@@ -241,15 +258,32 @@ def extract_code_with_info(text: str) -> tuple[str, dict]:
             "extraction_method": "last_fenced_anywhere",
             "extraction_issue": "none",
         }
-    # 3. def ... after </think>
+    # 3. unterminated/opening fenced block after </think>
+    stripped = after_think.lstrip()
+    if OPENING_FENCE_RE.match(stripped):
+        return _strip_unmatched_fence(stripped), {
+            "extraction_method": "opening_fence_after_think",
+            "extraction_issue": "unterminated_fence",
+        }
+
+    # 4. code-looking block after prose/imports/classes
+    m = CODE_START_RE.search(after_think)
+    if m:
+        issue = "no_fenced_block" if m.start() == 0 else "prose_before_code"
+        return _strip_unmatched_fence(after_think[m.start():]), {
+            "extraction_method": "code_start_after_think",
+            "extraction_issue": issue,
+        }
+
+    # 5. def ... after </think>
     m = CODE_DEF_RE.search(after_think)
     if m:
         return m.group(1), {
             "extraction_method": "def_after_think",
             "extraction_issue": "no_fenced_block",
         }
-    # 4. everything after </think>
-    code = after_think.strip()
+    # 6. everything after </think>
+    code = _strip_unmatched_fence(after_think)
     return code, {
         "extraction_method": "after_think_fallback" if code else "empty",
         "extraction_issue": "no_fenced_block" if code else "empty_code",
