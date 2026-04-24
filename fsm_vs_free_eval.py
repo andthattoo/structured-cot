@@ -297,14 +297,21 @@ def extract_code_with_info(text: str) -> tuple[str, dict]:
       4. First code-looking block after prose
       5. Empty code if no code-like block can be found
     """
-    after_think = text.split("</think>", 1)[-1] if "</think>" in text else text
+    think_close_count = text.count("</think>")
+    after_think = text.rsplit("</think>", 1)[-1] if think_close_count else text
+    extraction_issue_override = "extra_think_tag_after_code" if think_close_count > 1 else None
+
+    def _issue(default: str) -> str:
+        return extraction_issue_override or default
+
+    clean_after_think = after_think.lstrip()
 
     # 1. last fenced block after </think>
     matches = CODE_FENCED_RE.findall(after_think)
     if matches:
         return matches[-1], {
             "extraction_method": "last_fenced_after_think",
-            "extraction_issue": "none",
+            "extraction_issue": _issue("none"),
         }
     # 2. last fenced block anywhere
     matches = CODE_FENCED_RE.findall(text)
@@ -318,44 +325,46 @@ def extract_code_with_info(text: str) -> tuple[str, dict]:
     if OPENING_FENCE_RE.match(stripped):
         return _strip_unmatched_fence(stripped), {
             "extraction_method": "opening_fence_after_think",
-            "extraction_issue": "unterminated_fence",
+            "extraction_issue": _issue("unterminated_fence"),
         }
 
-    m = OPENING_FENCE_ANYWHERE_RE.search(after_think)
+    m = OPENING_FENCE_ANYWHERE_RE.search(clean_after_think)
     if m:
-        return _strip_unmatched_fence(after_think[m.end():]), {
+        return _strip_unmatched_fence(clean_after_think[m.end():]), {
             "extraction_method": "opening_fence_anywhere",
-            "extraction_issue": "prose_before_unterminated_fence",
+            "extraction_issue": _issue("prose_before_unterminated_fence"),
         }
 
     # Some no-fence grammars still make the model emit a bare language label:
     # "python\nfrom ...".  Treat that separately from real prose-before-code.
-    label = LANGUAGE_LABEL_RE.match(after_think)
+    label = LANGUAGE_LABEL_RE.match(clean_after_think)
     if label:
-        after_label = after_think[label.end():]
+        after_label = clean_after_think[label.end():].lstrip()
         m = CODE_START_RE.search(after_label)
         if m:
-            issue = "language_label_before_code" if m.start() == 0 else "language_label_then_prose_before_code"
+            prefix = after_label[:m.start()]
+            issue = "language_label_before_code" if not prefix.strip() else "language_label_then_prose_before_code"
             return _strip_unmatched_fence(after_label[m.start():]), {
                 "extraction_method": "code_start_after_language_label",
-                "extraction_issue": issue,
+                "extraction_issue": _issue(issue),
             }
 
     # 4. code-looking block after prose/imports/classes
-    m = CODE_START_RE.search(after_think)
+    m = CODE_START_RE.search(clean_after_think)
     if m:
-        issue = "no_fenced_block" if m.start() == 0 else "prose_before_code"
-        return _strip_unmatched_fence(after_think[m.start():]), {
+        prefix = clean_after_think[:m.start()]
+        issue = "no_fenced_block" if not prefix.strip() else "prose_before_code"
+        return _strip_unmatched_fence(clean_after_think[m.start():]), {
             "extraction_method": "code_start_after_think",
-            "extraction_issue": issue,
+            "extraction_issue": _issue(issue),
         }
 
     # 5. def ... after </think>
-    m = CODE_DEF_RE.search(after_think)
+    m = CODE_DEF_RE.search(clean_after_think)
     if m:
         return m.group(1), {
             "extraction_method": "def_after_think",
-            "extraction_issue": "no_fenced_block",
+            "extraction_issue": _issue("no_fenced_block"),
         }
     # 6. No runnable-looking code found.  Do not execute prose as Python.
     return "", {

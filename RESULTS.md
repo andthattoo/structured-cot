@@ -199,6 +199,21 @@ The shared rollouts also showed a harmless extraction artifact: no-fence grammar
 
 Implementation note: llama.cpp's GBNF parser in this setup rejects `{m,n}` repetition ranges and underscores in rule names, so the checked-in experimental grammars avoid both.
 
+Early 10-problem `fsm_grammar_lcb_code_start_bounded.gbnf` run:
+
+| Metric | Value |
+|---|---:|
+| pass@1 | 2 / 10 = 20.0% |
+| mean think tokens | 221 |
+| mean total tokens | 1346 |
+| mean post-think tokens | 1125 |
+| mean comment tokens | 0 |
+| answer-channel bloat | 1 / 10 |
+| comment bloat | 0 / 10 |
+| generation errors | 2 / 10 |
+
+This confirms the token side of the hypothesis: code-start/no-comments collapses comments and most answer-channel bloat. It also confirms the capability cost: pass rate drops well below the permissive `plan` grammar. The original summary overcounted `prose_before_code` because the extractor treated the normal blank line after `</think>` as prose; the extractor now ignores leading whitespace, treats bare `python` labels separately, and prefers code after the last `</think>` if the model emits a stray second close tag.
+
 For LiveCodeBench, useful reporting should include:
 
 - `think_tokens`
