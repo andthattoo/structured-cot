@@ -76,12 +76,23 @@ def load_benchmark(name: str, n: int, args=None):
         platform = getattr(args, "platform", "leetcode")
 
         print(f"  loading livecodebench/code_generation_lite (version={version})")
-        ds = load_dataset(
-            "livecodebench/code_generation_lite",
-            split="test",
-            version_tag=version,
-            trust_remote_code=True,
-        )
+        try:
+            ds = load_dataset(
+                "livecodebench/code_generation_lite",
+                split="test",
+                version_tag=version,
+                trust_remote_code=True,
+            )
+        except RuntimeError as e:
+            if "Dataset scripts are no longer supported" in str(e):
+                raise RuntimeError(
+                    "LiveCodeBench code_generation_lite currently requires "
+                    "Hugging Face datasets<4 because it uses a dataset loading "
+                    "script. Run `uv sync --upgrade-package datasets` after "
+                    "pulling the latest pyproject.toml, or install "
+                    "`datasets>=3,<4` in this environment."
+                ) from e
+            raise
         rows = list(ds)
         print(f"  {len(rows)} total problems in {version}")
 

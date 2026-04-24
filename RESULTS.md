@@ -1,4 +1,4 @@
-# Results — HumanEval+ full run
+# Results — HumanEval+ full run, cleaned evaluator
 
 **Date:** 2026-04-24
 **Hardware:** 1× H100 (Lambda Labs)
@@ -6,122 +6,137 @@
 **Inference:** `llama-cpp-python` 0.3+ server, flash-attn on, KV cache `q8_0`, `n_ctx=65536`
 **Benchmark:** [`evalplus/humanevalplus`](https://huggingface.co/datasets/evalplus/humanevalplus) — 164 problems (HumanEval with augmented tests)
 **Budget:** `max_new_tokens=8192`, greedy (`temperature=0`)
-**Total wall time:** 6853 s ≈ 114 min for 2 × 164 = 328 rollouts
+**Run:** `FREE`, `FSM`, and `PROMPT_TERSE` for 3 × 164 = 492 rollouts
+
+This supersedes the earlier two-mode report. The evaluator now calls `check(entry_point)` directly; it no longer catches `NameError`, so missing functions and undefined-name implementations fail normally.
 
 ## Headline
 
 | Mode | pass@1 | mean think tokens | mean total tokens |
-|---|---|---|---|
-| **FREE** (natural `<think>…</think>`) | **152 / 164 = 92.7%** | 3087 | 3410 |
-| **FSM** (grammar-constrained) | **152 / 164 = 92.7%** | **138** | 408 |
+|---|---:|---:|---:|
+| **FREE** (natural `<think>...</think>`) | **151 / 164 = 92.1%** | 3087 | 3410 |
+| **FSM** (grammar-constrained `GOAL/APPROACH/EDGE`) | **152 / 164 = 92.7%** | **138** | **408** |
+| **PROMPT_TERSE** (prompt asks for `GOAL/APPROACH/EDGE`, no grammar) | **153 / 164 = 93.3%** | 2298 | 2764 |
 
-- **Accuracy Δ (FSM − FREE)**: **+0.0 pp**
-- **Think-token compression**: **22.45×**
-- **Total-token compression**: **8.36×**
+- **Accuracy Δ (FSM − FREE):** **+0.6 pp**
+- **Think-token compression (FREE / FSM):** **22.45×**
+- **Total-token compression (FREE / FSM):** **8.36×**
+- **Prompt-only think compression (FREE / PROMPT_TERSE):** **1.34×**
+- **Grammar gain over prompt-only compression (PROMPT_TERSE / FSM):** **16.65×**
 
-Pass rates are identical to the single problem. The underlying *sets* of passing problems are not identical — they disagree on 10 out of 164 — but the disagreement is symmetric (5 problems where FREE wins, 5 where FSM wins).
+The clean takeaway is not that terse prompting is enough. `PROMPT_TERSE` slightly improves pass@1 on this run, but it still spends 2298 thinking tokens on average. The grammar-constrained run preserves the same accuracy band while forcing a radically smaller thinking format.
 
-## Disagreement breakdown
+## Pass-set overlap
 
 | Outcome | Count | Problems |
-|---|---|---|
-| 🟰 Both pass | 147 | (most of the benchmark) |
-| ❌ Both fail | 7 | 32, 76, 91, 132, 145, 151, 163 |
-| 🔺 **FSM wins** (FREE fail → FSM pass) | 5 | 9, 26, 93, 141, 154 |
-| 🔻 **FREE wins** (FSM fail → FREE pass) | 5 | 86, 97, 124, 125, 134 |
+|---|---:|---|
+| Both pass | 146 | (most of the benchmark) |
+| Both fail | 7 | 32, 76, 91, 132, 145, 151, 163 |
+| **FSM-only pass** (FREE fail → FSM pass) | 6 | 9, 26, 93, 129, 141, 154 |
+| **FREE-only pass** (FSM fail → FREE pass) | 5 | 86, 97, 124, 125, 134 |
 
-Notable:
-- **HumanEval/154** — FREE hit the timeout (`TIMEOUT`), FSM finished in 145 think tokens. When verbose reasoning runs out of budget mid-problem, FSM's structural ceiling is an advantage.
-- **HumanEval/9, 26, 93, 141** — FREE produced `NameError` or incomplete code, typically because its multi-draft response pattern leads to ambiguous final code even with our last-fenced-block extraction. FSM's single code block after `</think>` sidesteps this.
-- **HumanEval/86, 97, 124, 125, 134** — FSM's compressed plan didn't surface an edge case that FREE caught. These are genuine cases where 150 tokens of plan isn't sufficient scaffolding for the problem's complexity.
+The pairwise disagreement remains small: 11 / 164 problems differ between `FREE` and `FSM`, with a slight edge to `FSM`.
 
-## Per-problem compression distribution
+## Prompt-terse control
 
-Looking across the 152 problems both modes solved correctly:
+| Outcome | Count | Problems |
+|---|---:|---|
+| All pass | 144 | (most of the benchmark) |
+| All fail | 6 | 32, 76, 91, 132, 145, 151 |
+| **PROMPT_TERSE-only pass** | 1 | 163 |
+| **PROMPT_TERSE-only fail** | 2 | 12, 95 |
+| PROMPT_TERSE matches FREE, not FSM | 6 | 97, 124, 125, 134, 141, 154 |
+| PROMPT_TERSE matches FSM, not FREE | 5 | 9, 26, 86, 93, 129 |
 
-| Metric | Value |
-|---|---|
-| Median think-token compression | ~15× |
-| Max compression | 70× (HumanEval/18) |
-| Min compression | 1.5× (HumanEval/27, which had complex state tracking) |
-| FSM think mean on both-pass problems | 135 tokens |
-| FREE think mean on both-pass problems | 2930 tokens |
+This control separates "asked to be terse" from "forced to be terse." Prompt-only sometimes changes outcomes, but it does not reliably control reasoning length. In several logged cases, `PROMPT_TERSE` used thousands of thinking tokens despite the instruction to use a three-line plan.
 
-Compression is tightly correlated with problem triviality. For one-liners like `truncate_number`, FREE spent 1509 thinking tokens and FSM spent 142 — not because the problem is hard, but because FREE's thinking-mode habitually enumerates doctest examples, discusses floating-point precision, mentally benchmarks alternatives. The grammar strips that ceremony without losing correctness.
+## Failure accounting
+
+| Mode | Failures | Failure types | Extraction issues |
+|---|---:|---|---|
+| FREE | 13 | missing_entry_point=1, runtime_error=9, runtime_name_error=2, timeout=1 | none |
+| FSM | 12 | runtime_error=12 | none |
+| PROMPT_TERSE | 11 | runtime_error=8, runtime_name_error=1, syntax_error=1, timeout=1 | none |
+
+The absence of extraction issues is important. The cleaned run is not being decided by fenced-code parsing failures; the remaining failures are execution failures, timeouts, or generated code that does not satisfy the tests.
 
 ## Representative examples
 
-### HumanEval/18 — 70× compression, both pass
+### HumanEval/9 — FSM and PROMPT_TERSE rescue a FREE failure
 
-FREE think (3426 tokens) includes:
-- 8 paragraphs of problem-statement re-analysis
-- 3 different candidate algorithms compared
-- Multiple self-corrections ("wait, that's wrong...")
-- Explicit doctest walk-throughs
+Logged result:
 
-FSM think (49 tokens):
-```
-GOAL: count non-overlapping occurrences of substring in string
-APPROACH: use str.count(sub) which counts non-overlapping matches
-EDGE: empty substring should return 0
-```
+| Mode | Outcome | Think tokens |
+|---|---:|---:|
+| FREE | fail | 2835 |
+| FSM | pass | 102 |
+| PROMPT_TERSE | pass | 4161 |
 
-Both produce correct code. FSM's plan captures the algorithmic decision (use `.count()`) and the key edge case. The 3377 tokens FREE spent beyond that are not load-bearing for this problem.
+This is not clean evidence that the grammar improved reasoning over prompt-only. `PROMPT_TERSE` also passed. But it is strong evidence that grammar constraint enforces the compact token regime: prompt-only passed while spending about 41× more thinking tokens than `FSM`.
 
-### HumanEval/86 — FSM regression, FREE wins
+### HumanEval/86 — compressed formats regress
 
-FSM's compressed plan:
-```
-GOAL: sort words in each sentence alphabetically
-APPROACH: split into words, sort, join
-EDGE: maintain space separators
-```
+Logged result:
 
-FREE's verbose thinking explicitly considered whether "alphabetically" meant case-sensitive or insensitive, settled on ASCII-order (case-sensitive), verified with examples. FSM's plan didn't probe this, produced case-insensitive sort, failed on a test case with mixed-case input.
+| Mode | Outcome | Think tokens |
+|---|---:|---:|
+| FREE | pass | 3721 |
+| FSM | fail | 56 |
+| PROMPT_TERSE | fail | 1062 |
 
-This is the class of error we expect from compression: **underspecified edge cases that verbose reasoning happens to explore**. It's not a capability failure of the model — it's an attentional failure of the compressed format.
+This is the expected failure mode for aggressive compression: a compact plan can skip an underspecified edge case that verbose reasoning happens to explore. In this run, `PROMPT_TERSE` also failed and produced a syntax/indentation failure, so this problem should be inspected in `per_problem.md` before attributing the failure entirely to reasoning compression.
+
+### HumanEval/83 — large compression with no accuracy loss
+
+Logged result:
+
+| Mode | Outcome | Think tokens |
+|---|---:|---:|
+| FREE | pass | 4054 |
+| FSM | pass | 48 |
+| PROMPT_TERSE | pass | 2625 |
+
+This is the central pattern: `FREE` and `PROMPT_TERSE` spend thousands of reasoning tokens, while `FSM` emits a tiny structured plan and still passes.
 
 ## Token-budget sensitivity
 
-Since the FSM mode uses ~22× fewer thinking tokens, it's interesting to look at whether FREE is bottlenecked by the 8192-token budget:
+`FREE` averages 3410 total completion tokens, well below the 8192-token budget. The compression result is therefore not mainly explained by `FREE` being cut off. `FSM` averages 408 total tokens, making its budget pressure practically irrelevant on HumanEval+.
 
-- FREE mean total: 3410 tokens. Well below budget.
-- FREE max: one of the timeouts hit the budget.
-- FSM mean total: 408 tokens. Practically irrelevant for budget.
-
-So the compression here isn't "FREE got cut off, FSM didn't." The comparison is fair — FREE had room to finish its natural generation on ~98% of problems.
+`PROMPT_TERSE` averages 2764 total tokens. It reduces verbosity somewhat, but not enough to behave like a controlled compression method.
 
 ## Methodology notes
 
-**Test execution** — each generated code is combined with the benchmark's `test` body and `entry_point`, written to a temp file, executed via `python $FILE` in a subprocess with 30s timeout. `check(entry_point)` is called; pass = returncode 0. Early iterations used `python -c` and hit `E2BIG / Errno 7` on long programs; tempfile-based execution is correct.
+**Modes**
 
-**Token counts** — using `Qwen/Qwen3.6-35B-A3B` tokenizer loaded via `transformers`. Think tokens measured on the extracted portion of the response between (or before) `<think>/</think>` tags. Total tokens from server's `usage.completion_tokens`.
+- `FREE`: standard thinking-mode generation with the shared system prompt.
+- `FSM`: same user prompt, but the server receives a GBNF grammar forcing `<think>` to contain exactly `GOAL`, `APPROACH`, and `EDGE` lines before unconstrained code.
+- `PROMPT_TERSE`: no grammar; the system prompt merely asks the model to use the same `GOAL/APPROACH/EDGE` thinking format.
 
-**Code extraction** — prefers the *last* fenced `python` block in the response (FREE mode often emits draft code blocks mid-thinking; the final answer is always last). Earlier iterations took the first fenced block and scored FREE incorrectly on multi-draft responses.
+**Test execution** — each generated code block is combined with the benchmark's `test` body and `entry_point`, written to a temp file, and executed via `python $FILE` in a subprocess with a 30s timeout. The harness calls `check(entry_point)` directly. Missing functions and undefined names now fail normally.
 
-**Both modes use the same prompt** — a system message asking for careful thought and a fenced `python` final answer. Only difference: the FSM run passes `grammar` in the request body; the FREE run doesn't.
+**Token counts** — using the `Qwen/Qwen3.6-35B-A3B` tokenizer loaded via `transformers`. Think tokens are measured on the extracted portion of the response between, or before, `<think>/</think>` tags. Total tokens come from the server's `usage.completion_tokens`.
+
+**Code extraction** — prefers the last fenced `python` block after `</think>`, then the last fenced block anywhere, then a `def ...` block, then a fallback. The cleaned run reports no extraction issues for any mode.
 
 ## Limitations and caveats
 
-1. **HumanEval contamination.** The benchmark has been public since 2021. Qwen3.6's training data almost certainly contains many HumanEval solutions. Both modes may be recalling memorized code rather than reasoning from first principles. The 22× compression could mean "the model stops wasting tokens on rehearsal of a memorized answer" rather than "the model reasons in compressed form." **We cannot distinguish these from HumanEval alone.**
+1. **HumanEval contamination.** HumanEval has been public since 2021. Qwen3.6 may have seen many solutions during training. This result shows that grammar-constrained thinking preserves performance on this benchmark; it does not prove post-cutoff reasoning preservation.
 
-2. **Small accuracy delta, single seed.** `+0.0 pp` is cleanly interpretable only because of the symmetric 5-5 disagreement. With temperature=0 (greedy) there is no seed variance, but a different problem pool, different base prompt, or different grammar could shift this by ±5 pp in either direction.
+2. **Single model, single quant.** All results are on Qwen3.6-35B-A3B with `Q4_K_M` quantization. Other models, quantizations, and reasoning recipes may have different compression ceilings.
 
-3. **Single model.** All results are on Qwen3.6-35B-A3B with `Q4_K_M` quantization. Different base models, different quants, or different reasoning-tuning recipes may give very different compression ceilings.
+3. **One domain.** HumanEval+ is short-form Python function synthesis. Math, logic, planning, and long-horizon agentic tasks may need different compressed formats or may lose more accuracy.
 
-4. **One domain.** Coding problems with test-case correctness signal. Whether the same grammar approach transfers to math (MATH, GSM8K, AIME), logic (LogicBench, FOLIO), planning (BlocksWorld), or open-ended reasoning is untested.
+4. **Grammar specificity.** The `GOAL/APPROACH/EDGE` format was tuned for coding. It is a minimum viable grammar, not evidence of an optimal structure.
 
-5. **Grammar tuning.** The `GOAL/APPROACH/EDGE` three-line format was chosen after two grammar iterations (multi-line rules → single-line; bullet-loop trap → one-line sections; invalid `\-` escape → hex char classes). A better grammar for coding tasks probably exists; this is a near-minimum viable one.
+5. **Public benchmark scoring.** The run uses the dataset's available augmented tests. LiveCodeBench public functional tests are the next step, but should be labeled as public-test pass rate unless the official/private evaluator is wired in.
 
-## Next runs (in priority order)
+## Next runs
 
-1. **LiveCodeBench post-cutoff subset.** Filter to `contest_date >= 2025-12-01`. Resolves the contamination question. If FSM still matches FREE, compression is real for reasoning. If FSM regresses >10pp, grammar was riding on memorized patterns.
-2. **MBPP+.** Bigger, messier, less clean. Confirms the finding generalizes slightly.
-3. **Smaller base model.** Qwen2.5-7B-Instruct. Does the capability hold when the base is weaker?
-4. **Math / logic.** Same grammar or domain-specific grammar on GSM8K and LogicBench.
+1. **LiveCodeBench post-release subset.** For Qwen3.6, use `contest_date >= 2026-04-23` as the strict cutoff. If that yields too few problems, also run `contest_date >= 2026-03-01` and label it as recent-but-risky rather than clean.
+2. **MBPP+.** Bigger and messier than HumanEval+, useful as a second coding benchmark.
+3. **Smaller models.** Test whether grammar compression still works when the model has less latent capability.
+4. **Math / logic.** Try the same grammar and domain-specific grammars on GSM8K, MATH/AIME-style tasks, and logic benchmarks.
 
 ## Raw data
 
-All per-problem data — raw responses, extracted think/code, token counts, errors — is in `fsm_vs_free/results.jsonl` from the run (not committed to the repo; regenerate by running the eval). The aggregate `summary.json` is similar but compact.
-
-A human-readable `per_problem.md` is auto-generated at the end of each run, with one section per problem including problem statement, both extracted think blocks side by side, both codes, and outcome tag.
+All per-problem data — raw responses, extracted think/code, token counts, errors, extraction metadata, and failure buckets — is written to `fsm_vs_free/results.jsonl` by the evaluator. The aggregate report is `fsm_vs_free/summary.json`, and the readable per-problem report is `fsm_vs_free/per_problem.md`.
