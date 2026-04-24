@@ -18,9 +18,13 @@
 #   FLASH_ATTN       — 1 to pass --flash-attn (default: 1)
 #   SPEC_DEFAULT     — 1 to pass --spec-default (default: 1)
 #   KV_TYPE          — optional KV cache type, e.g. q8_0 or q4_0
+#   BACKGROUND       — 1 to start with nohup and return (default: 0)
+#   LOG_FILE         — log path for BACKGROUND=1 (default: server.log)
+#   PID_FILE         — pid path for BACKGROUND=1 (default: server.pid)
 #
 # Extra CLI args can be appended after the script:
 #   ./run_llama_server.sh --parallel 2
+#   BACKGROUND=1 ./run_llama_server.sh
 
 set -euo pipefail
 
@@ -32,6 +36,9 @@ HOST="${HOST:-127.0.0.1}"
 N_GPU_LAYERS="${N_GPU_LAYERS:-999}"
 FLASH_ATTN="${FLASH_ATTN:-1}"
 SPEC_DEFAULT="${SPEC_DEFAULT:-1}"
+BACKGROUND="${BACKGROUND:-0}"
+LOG_FILE="${LOG_FILE:-server.log}"
+PID_FILE="${PID_FILE:-server.pid}"
 
 if ! command -v "${LLAMA_SERVER_BIN}" >/dev/null 2>&1; then
     echo "ERROR: llama-server not found: ${LLAMA_SERVER_BIN}"
@@ -97,5 +104,26 @@ if [ -n "${KV_TYPE:-}" ]; then
     echo "  kv_type    = ${KV_TYPE}"
 fi
 echo
+
+if [ "${BACKGROUND}" = "1" ]; then
+    if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+        echo "Server already appears to be running with PID $(cat "${PID_FILE}")"
+        echo "  log = ${LOG_FILE}"
+        echo "  pid = ${PID_FILE}"
+        exit 0
+    fi
+
+    echo "Starting in background"
+    echo "  log = ${LOG_FILE}"
+    echo "  pid = ${PID_FILE}"
+    nohup "${LLAMA_SERVER_BIN}" "${ARGS[@]}" "$@" > "${LOG_FILE}" 2>&1 &
+    pid=$!
+    echo "${pid}" > "${PID_FILE}"
+    echo "Started llama-server PID ${pid}"
+    echo "Wait for readiness:"
+    echo "  tail -f ${LOG_FILE}"
+    echo "  curl http://${HOST}:${PORT}/v1/models"
+    exit 0
+fi
 
 exec "${LLAMA_SERVER_BIN}" "${ARGS[@]}" "$@"

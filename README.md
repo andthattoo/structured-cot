@@ -93,27 +93,33 @@ huggingface-cli download unsloth/Qwen3.6-35B-A3B-GGUF \
 
 ## Run
 
-Two processes, two tmux panes.
+The server can run in the foreground in one pane, or in the background from a single terminal.
 
-### Pane 1 — start the server
+### Start the server
 
 ```bash
-./run_llama_server.sh
-# Or in background:
-# nohup ./run_llama_server.sh > server.log 2>&1 &
+BACKGROUND=1 ./run_llama_server.sh
+tail -f server.log
+curl http://127.0.0.1:8000/v1/models
 ```
 
 By default this downloads/serves `ggml-org/Qwen3.6-27B-GGUF` through native `llama-server` with `--spec-default`. Override with env vars:
 
 ```bash
-HF_REPO=ggml-org/Qwen3.6-27B-GGUF N_CTX=32768 ./run_llama_server.sh
-MODEL_PATH=/path/to/model.gguf ./run_llama_server.sh
-KV_TYPE=q8_0 ./run_llama_server.sh
+HF_REPO=ggml-org/Qwen3.6-27B-GGUF N_CTX=32768 BACKGROUND=1 ./run_llama_server.sh
+MODEL_PATH=/path/to/model.gguf BACKGROUND=1 ./run_llama_server.sh
+KV_TYPE=q8_0 BACKGROUND=1 ./run_llama_server.sh
+```
+
+Background mode writes `server.log` and `server.pid`. Stop it with:
+
+```bash
+kill "$(cat server.pid)"
 ```
 
 If you prefer the original Python server, use `./run_server.sh`. It auto-discovers the GGUF from `~/.cache/huggingface/hub/` or `~/models/`, uses 8-bit KV cache (`q8_0`), flash attention, and `n_ctx=65536`.
 
-### Pane 2 — run the comparison
+### Run the comparison
 
 ```bash
 # Smoke test
