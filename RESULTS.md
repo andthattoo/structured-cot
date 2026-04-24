@@ -189,6 +189,32 @@ Failure accounting: `wrong_answer=13`, `syntax_error=3`, `runtime_error=1`, `tim
 
 This is the best LiveCodeBench grammar result so far. The richer plan preserves substantially more capability than the no-comments/fenced/code-start variants, but the token accounting shows why think-token compression alone is not enough on harder tasks. The useful interpretation is demand-adaptive reasoning: easy problems stay compact; harder problems often spend extra tokens in the answer channel, especially comments.
 
+FREE baseline on the same 50-problem slice:
+
+| Metric | FREE | FSM_PLAN |
+|---|---:|---:|
+| pass@1 | 25 / 50 = 50.0% | 32 / 50 = 64.0% |
+| mean think tokens | 11553 | 267 |
+| mean total tokens | 13632 | 2743 |
+| mean post-think tokens | 2079 | 2476 |
+| mean comment tokens | 52 | 1753 |
+| answer-channel bloat | 11 / 50 | 16 / 50 |
+| comment bloat | 0 / 50 | 19 / 50 |
+| extraction issues | empty_code=18 | none |
+
+Failure accounting for FREE: `extraction_empty_code=18`, `syntax_error=4`, `missing_entry_point=1`, `timeout=1`, `wrong_answer=1`.
+
+This is the clean LiveCodeBench comparison: FREE often spends the full 16k-token budget in explicit thinking and never emits runnable code. `FSM_PLAN` forces an early compact plan and reaches code reliably, improving public-test pass@1 by +14 percentage points while cutting mean total tokens by roughly 5x. The tradeoff is displacement: when problems are hard, `FSM_PLAN` spends some of the saved reasoning budget as comments or other post-think answer-channel content.
+
+Representative examples:
+
+| Task | FREE | FSM_PLAN |
+|---|---|---|
+| 3702 | fail, 16384 think, empty code | pass, compact plan |
+| 3715 | fail, 16384 think, empty code | pass, compact plan plus answer-channel work |
+| 3781 | fail, 16384 think, empty code | pass, 260 think / 7914 total |
+| 3708 | pass, 4370 think / 4492 total | pass, 191 think / 361 total |
+
 Shared rollouts reveal two separate displacement channels:
 
 - Comment displacement: `3562` produced 217 comment lines and 4050 comment tokens, then failed with an indentation error. This is the pure `#`-scratchpad pathology.
