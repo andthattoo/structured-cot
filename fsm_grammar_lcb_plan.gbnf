@@ -1,0 +1,10 @@
+# Richer LiveCodeBench plan, but permissive answer region.
+# This isolates whether GOAL/STATE/ALGO/EDGE/VERIFY helps harder tasks without
+# also constraining Python formatting.
+#
+# Each rule MUST be on a single line for llama.cpp's GBNF parser.
+
+root ::= think code
+think ::= "<think>\n" "GOAL: " line "STATE: " line "ALGO: " line "EDGE: " line "VERIFY: " line "</think>\n\n"
+line ::= [^\n]+ "\n"
+code ::= [\x09\x0A\x0D\x20-\x7E]+
