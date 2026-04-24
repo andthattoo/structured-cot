@@ -198,6 +198,15 @@ OPENING_FENCE_RE = re.compile(r"^```(?:python|py)?[ \t\r]*\n?", re.IGNORECASE)
 OPENING_FENCE_ANYWHERE_RE = re.compile(r"```(?:python|py)?[ \t\r]*\n?", re.IGNORECASE)
 
 
+def _strip_think_tags(text: str) -> str:
+    text = text.strip()
+    while text.startswith("<think>"):
+        text = text[len("<think>"):].strip()
+    while text.endswith("</think>"):
+        text = text[: -len("</think>")].strip()
+    return text
+
+
 def _strip_unmatched_fence(code: str) -> str:
     """Remove a leading opening fence when the model forgot the closing fence."""
     code = code.strip()
@@ -218,8 +227,8 @@ def extract_think(text: str) -> str:
     if "</think>" in text:
         m = THINK_OPEN_CLOSE_RE.search(text)
         if m:
-            return m.group(1).strip()
-        return text.split("</think>", 1)[0].strip()
+            return _strip_think_tags(m.group(1))
+        return _strip_think_tags(text.split("</think>", 1)[0])
 
     # No tags.  Thinking is whatever comes before the first fenced code block.
     m = CODE_FENCED_RE.search(text)
@@ -555,7 +564,8 @@ def message_text(message) -> str:
         extra = getattr(message, "model_extra", None) or {}
         reasoning = extra.get("reasoning_content") or extra.get("reasoning")
     if reasoning:
-        return f"<think>\n{str(reasoning).strip()}\n</think>\n\n{content}"
+        reasoning_text = _strip_think_tags(str(reasoning))
+        return f"<think>\n{reasoning_text}\n</think>\n\n{content}"
     return content
 
 
