@@ -172,6 +172,23 @@ Early 10-problem `fsm_grammar_lcb_plan.gbnf` run after the harness/comment-metri
 
 This is a much better accuracy signal than the fenced/strict variants, but it is not a compression win. The model still moves most of its deliberation into the answer channel, mostly as Python comments. The next useful ablation is therefore `fsm_grammar_lcb_no_comments.gbnf`: keep the richer five-field plan, do not force a fence, but remove the `#` comment escape hatch.
 
+Full 50-problem `fsm_grammar_lcb_plan.gbnf` run:
+
+| Metric | Value |
+|---|---:|
+| pass@1 | 32 / 50 = 64.0% |
+| mean think tokens | 267 |
+| mean total tokens | 2743 |
+| mean post-think tokens | 2476 |
+| mean comment tokens | 1753 |
+| answer-channel bloat | 16 / 50 |
+| comment bloat | 19 / 50 |
+| failures | 18 / 50 |
+
+Failure accounting: `wrong_answer=13`, `syntax_error=3`, `runtime_error=1`, `timeout=1`. Extraction issues: none.
+
+This is the best LiveCodeBench grammar result so far. The richer plan preserves substantially more capability than the no-comments/fenced/code-start variants, but the token accounting shows why think-token compression alone is not enough on harder tasks. The useful interpretation is demand-adaptive reasoning: easy problems stay compact; harder problems often spend extra tokens in the answer channel, especially comments.
+
 Shared rollouts reveal two separate displacement channels:
 
 - Comment displacement: `3562` produced 217 comment lines and 4050 comment tokens, then failed with an indentation error. This is the pure `#`-scratchpad pathology.

@@ -222,7 +222,7 @@ For the FSM experiment, the base-LM architecture doesn't matter much — we're c
 ## Status
 
 - ✅ HumanEval+ full (164 problems): FSM 152/164 vs FREE 151/164, 22× think-token compression
-- 🧪 LiveCodeBench v6 recent subset (script ready; run pending) — public functional-test contamination pressure
+- ✅ LiveCodeBench v6 recent LeetCode subset, public tests (50 problems): best current variant `fsm_grammar_lcb_plan.gbnf` passes 32/50 = 64.0%; explicit think stays compact, but reasoning often shifts into post-think/comment tokens
 - ⏳ MBPP+ (planned)
 - 🔲 Other domains (math, logic, planning)
 - 🔲 Cross-model transfer (smaller models)
