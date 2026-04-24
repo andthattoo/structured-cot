@@ -78,7 +78,7 @@ The repo includes [`run_llama_server.sh`](run_llama_server.sh), which defaults t
 
 ```bash
 llama-server -hf ggml-org/Qwen3.6-27B-GGUF --spec-default \
-    --host 127.0.0.1 --port 8000 -c 32768 -ngl 999 --flash-attn
+    --host 127.0.0.1 --port 8000 -c 32768 -ngl 999 --flash-attn on
 ```
 
 The older [`run_server.sh`](run_server.sh) still starts `llama-cpp-python` and is kept for reproducing the original run.

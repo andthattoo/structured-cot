@@ -15,7 +15,7 @@
 #   PORT             — server port (default: 8000)
 #   HOST             — bind address (default: 127.0.0.1)
 #   N_GPU_LAYERS     — GPU layers to offload (default: 999)
-#   FLASH_ATTN       — 1 to pass --flash-attn (default: 1)
+#   FLASH_ATTN       — on/off/auto, or 1/0 for on/off (default: on)
 #   SPEC_DEFAULT     — 1 to pass --spec-default (default: 1)
 #   KV_TYPE          — optional KV cache type, e.g. q8_0 or q4_0
 #   BACKGROUND       — 1 to start with nohup and return (default: 0)
@@ -34,7 +34,7 @@ N_CTX="${N_CTX:-32768}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-127.0.0.1}"
 N_GPU_LAYERS="${N_GPU_LAYERS:-999}"
-FLASH_ATTN="${FLASH_ATTN:-1}"
+FLASH_ATTN="${FLASH_ATTN:-on}"
 SPEC_DEFAULT="${SPEC_DEFAULT:-1}"
 BACKGROUND="${BACKGROUND:-0}"
 LOG_FILE="${LOG_FILE:-server.log}"
@@ -77,8 +77,18 @@ ARGS=(
     -ngl "${N_GPU_LAYERS}"
 )
 
-if [ "${FLASH_ATTN}" = "1" ]; then
-    ARGS+=(--flash-attn)
+case "${FLASH_ATTN}" in
+    1|on|ON|true|TRUE)       FLASH_ATTN_ARG="on" ;;
+    0|off|OFF|false|FALSE)   FLASH_ATTN_ARG="off" ;;
+    auto|AUTO)               FLASH_ATTN_ARG="auto" ;;
+    *)
+        echo "ERROR: FLASH_ATTN must be on/off/auto or 1/0, got '${FLASH_ATTN}'"
+        exit 1
+        ;;
+esac
+
+if [ "${FLASH_ATTN_ARG}" != "auto" ]; then
+    ARGS+=(--flash-attn "${FLASH_ATTN_ARG}")
 fi
 
 if [ "${SPEC_DEFAULT}" = "1" ]; then
@@ -98,7 +108,7 @@ fi
 echo "  n_ctx      = ${N_CTX}"
 echo "  host:port  = ${HOST}:${PORT}"
 echo "  gpu_layers = ${N_GPU_LAYERS}"
-echo "  flash_attn = ${FLASH_ATTN}"
+echo "  flash_attn = ${FLASH_ATTN_ARG}"
 echo "  spec       = ${SPEC_DEFAULT}"
 if [ -n "${KV_TYPE:-}" ]; then
     echo "  kv_type    = ${KV_TYPE}"
