@@ -353,6 +353,13 @@ def _extract_lcb_fn_name(problem: dict) -> str:
     return ""
 
 
+def _lcb_public_test_count(problem: dict) -> int:
+    try:
+        return len(json.loads(problem.get("public_test_cases") or "[]"))
+    except Exception:
+        return 0
+
+
 def run_tests_livecodebench(code: str, problem: dict, timeout: int = 30) -> tuple[bool, str]:
     """Run a LCB functional-test problem via a generated harness.
 
@@ -787,14 +794,16 @@ def main():
         user_prompt = build_user_prompt(prob, args.dataset)
         entry_point = prob.get("entry_point") or "candidate"
         test_code = prob.get("test", "")
+        task_id = prob["task_id"]
 
         def _score(code: str) -> tuple[bool, str]:
             if args.dataset == "livecodebench":
                 return run_tests_livecodebench(code, prob, args.timeout)
             return run_tests(code, test_code, entry_point, args.timeout)
 
-        row = {"task_id": prob["task_id"]}
+        row = {"task_id": task_id}
         t_prob = time.time()
+        print(f"  [{i+1}/{len(problems)}] {task_id:<16s} start", flush=True)
 
         def _generate(mode: str) -> tuple[str, int]:
             if mode == "free":
@@ -806,24 +815,48 @@ def main():
             raise ValueError(mode)
 
         for mode in active_modes:
+            label = MODE_LABELS[mode]
+            t_mode = time.time()
             try:
+                print(f"    {label:<13s} generating...", flush=True)
                 text, total_tokens = _generate(mode)
+                gen_dt = time.time() - t_mode
                 think = extract_think(text)
                 code, extraction = extract_code_with_info(text)
+                think_tokens = count_tokens(think, args.tokenizer)
+                entry_found = _entry_point_found(code, args.dataset, entry_point, prob)
+                test_detail = ""
+                if args.dataset == "livecodebench":
+                    test_detail = f" {_lcb_public_test_count(prob)} public cases"
+                print(
+                    f"    {label:<13s} generated in {gen_dt:.0f}s  "
+                    f"think={think_tokens} total={int(total_tokens)}  "
+                    f"extraction={extraction['extraction_issue']}  "
+                    f"entry={'yes' if entry_found else 'no'}; testing{test_detail}...",
+                    flush=True,
+                )
+                t_test = time.time()
                 passed, err = _score(code)
+                test_dt = time.time() - t_test
                 result = {
                     "pass": passed,
                     "err": err[:200],
-                    "think_tokens": count_tokens(think, args.tokenizer),
+                    "think_tokens": think_tokens,
                     "total_tokens": int(total_tokens),
                     "raw_response": text,
                     "extracted_think": think[:500],
                     "extracted_code": code[:500],
                     **extraction,
-                    "entry_point_found": _entry_point_found(code, args.dataset, entry_point, prob),
+                    "entry_point_found": entry_found,
                 }
                 result["failure_type"] = classify_failure(result)
                 row[mode] = result
+                print(
+                    f"    {label:<13s} {'pass' if passed else 'fail'}  "
+                    f"test={test_dt:.0f}s total={time.time() - t_mode:.0f}s  "
+                    f"failure={result['failure_type']}",
+                    flush=True,
+                )
             except Exception as e:
                 result = {
                     "pass": False,
@@ -834,6 +867,11 @@ def main():
                     "entry_point_found": False,
                 }
                 row[mode] = result
+                print(
+                    f"    {label:<13s} error after {time.time() - t_mode:.0f}s: "
+                    f"{type(e).__name__}: {e}",
+                    flush=True,
+                )
 
         dt = time.time() - t_prob
         results.append(row)
@@ -852,8 +890,9 @@ def main():
             f"{m}={tag(row.get(m))} ({tt(row.get(m))}tt)" for m in active_modes
         )
         print(
-            f"  [{i+1}/{len(problems)}] {prob['task_id']:<16s}  "
-            f"{status_str}  {dt:.0f}s{err_str}"
+            f"  [{i+1}/{len(problems)}] {task_id:<16s}  "
+            f"{status_str}  {dt:.0f}s{err_str}",
+            flush=True,
         )
 
     elapsed = time.time() - t_start
