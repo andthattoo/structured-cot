@@ -197,6 +197,8 @@ This showed that removing comments does remove the comment scratchpad, but the m
 
 The shared rollouts also showed a harmless extraction artifact: no-fence grammars can still produce a bare `python` language label before code. The extractor now reports that separately as `language_label_before_code` instead of mixing it with true `prose_before_code`. The next stricter variant, `fsm_grammar_lcb_code_start_bounded.gbnf`, blocks both the language label and raw prose by forcing the answer to begin with a Python code start token.
 
+Implementation note: llama.cpp's GBNF parser in this setup rejects `{m,n}` repetition ranges and underscores in rule names, so the checked-in experimental grammars avoid both.
+
 For LiveCodeBench, useful reporting should include:
 
 - `think_tokens`

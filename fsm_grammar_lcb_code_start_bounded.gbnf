@@ -11,6 +11,6 @@
 root ::= think code
 think ::= "<think>\n" "GOAL: " line "STATE: " line "ALGO: " line "EDGE: " line "VERIFY: " line "</think>\n\n"
 line ::= [^\n]+ "\n"
-code ::= code_start code_rest
-code_start ::= "from " | "import " | "class " | "def "
-code_rest ::= [\x09\x0A\x0D\x20-\x22\x24-\x5F\x61-\x7E]+
+code ::= codestart coderest
+codestart ::= "from " | "import " | "class " | "def "
+coderest ::= [\x09\x0A\x0D\x20-\x22\x24-\x5F\x61-\x7E]+
