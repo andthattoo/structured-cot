@@ -237,7 +237,9 @@ def extract_think(text: str) -> str:
     m = CODE_START_RE.search(text)
     if m:
         return text[: m.start()].strip()
-    return ""
+    # If the model never reaches code, the whole response is reasoning/prose.
+    # Counting this as zero thinking tokens makes max-token rambles look cheap.
+    return text.strip()
 
 
 def extract_code_with_info(text: str) -> tuple[str, dict]:
@@ -850,15 +852,25 @@ def main():
                 test_detail = ""
                 if args.dataset == "livecodebench":
                     test_detail = f" {_lcb_public_test_count(prob)} public cases"
-                print(
-                    f"    {label:<13s} generated in {gen_dt:.0f}s  "
-                    f"think={think_tokens} total={int(total_tokens)}  "
-                    f"extraction={extraction['extraction_issue']}  "
-                    f"entry={'yes' if entry_found else 'no'}; testing{test_detail}...",
-                    flush=True,
-                )
                 t_test = time.time()
-                passed, err = _score(code)
+                if extraction["extraction_issue"] == "empty_code":
+                    passed, err = False, "empty_code"
+                    print(
+                        f"    {label:<13s} generated in {gen_dt:.0f}s  "
+                        f"think={think_tokens} total={int(total_tokens)}  "
+                        f"extraction={extraction['extraction_issue']}  "
+                        f"entry=no; skipping tests",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"    {label:<13s} generated in {gen_dt:.0f}s  "
+                        f"think={think_tokens} total={int(total_tokens)}  "
+                        f"extraction={extraction['extraction_issue']}  "
+                        f"entry={'yes' if entry_found else 'no'}; testing{test_detail}...",
+                        flush=True,
+                    )
+                    passed, err = _score(code)
                 test_dt = time.time() - t_test
                 result = {
                     "pass": passed,
