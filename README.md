@@ -138,12 +138,30 @@ uv run python fsm_vs_free_eval.py --dataset livecodebench \
     --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
     --n-problems 50 --max-tokens 8192 --only all \
     --out-dir lcb_v6_2025_01_01_n50_all
+
+# LiveCodeBench FSM-only baseline grammar
+uv run python fsm_vs_free_eval.py --dataset livecodebench \
+    --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
+    --n-problems 50 --max-tokens 8192 --only fsm \
+    --grammar-file fsm_grammar.gbnf \
+    --out-dir lcb_v6_2025_01_01_fsm_base_grammar
+
+# LiveCodeBench FSM-only stricter grammar for answer-channel bloat
+uv run python fsm_vs_free_eval.py --dataset livecodebench \
+    --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
+    --n-problems 50 --max-tokens 8192 --only fsm \
+    --grammar-file fsm_grammar_lcb.gbnf \
+    --out-dir lcb_v6_2025_01_01_fsm_lcb_grammar
 ```
 
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting
 - `per_problem.md` — human-readable report with outcome tags (🔺 / 🔻 / 🟰 / ❌)
+
+The summary also reports `post_think_tokens_mean` and `answer_channel_bloat`,
+which are useful on LiveCodeBench because a model can obey a short `<think>`
+grammar while moving the missing scratchpad into the answer/code channel.
 
 ## Architecture notes
 
@@ -158,7 +176,7 @@ For the FSM experiment, the base-LM architecture doesn't matter much — we're c
 
 1. **Contamination.** HumanEval has been in training corpora for years. All modes may be recalling solutions, not reasoning. The "FSM matches FREE" result could mean "grammar extracts the same memorized solution in fewer tokens" rather than "grammar preserves reasoning capability." LiveCodeBench release v6 currently reaches April 2025, so it is a useful recent/lower-contamination check but not a strict post-Qwen3.6-release cutoff.
 
-2. **Grammar specificity.** The GOAL/APPROACH/EDGE format was tuned for coding. Math / logic / planning domains may need different symbolic formats. Unclear whether a single "universal" compressed-thinking grammar exists or whether each domain needs its own.
+2. **Grammar specificity.** The GOAL/APPROACH/EDGE format was tuned for short coding tasks. `fsm_grammar_lcb.gbnf` is an experimental stricter variant for harder LiveCodeBench tasks: `GOAL/STATE/ALGO/EDGE/VERIFY`, one fenced Python block, and no comment/backtick escape hatch in the code body. Math / logic / planning domains may need different symbolic formats. Unclear whether a single "universal" compressed-thinking grammar exists or whether each domain needs its own.
 
 3. **Reasoning depth.** The current result is on problems solvable in one forward pass. For multi-step problems (SWE-Bench, long-horizon planning, agentic tasks), whether grammar compression preserves capability is untested.
 

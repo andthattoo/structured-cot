@@ -36,6 +36,11 @@ Usage:
   uv run python fsm_vs_free_eval.py --dataset livecodebench \\
       --date-cutoff 2025-12-01 --platform leetcode --n-problems 50
 
+  # LiveCodeBench FSM-only A/B with a stricter coding grammar
+  uv run python fsm_vs_free_eval.py --dataset livecodebench \\
+      --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \\
+      --n-problems 50 --only fsm --grammar-file fsm_grammar_lcb.gbnf
+
   # Free-only or FSM-only (for debugging)
   uv run python fsm_vs_free_eval.py --only free --n-problems 10
   uv run python fsm_vs_free_eval.py --only fsm  --n-problems 10
@@ -693,6 +698,7 @@ def build_failure_accounting(results: list[dict], active_modes: list[str]) -> di
             r.get("extraction_issue", "unknown") for r in rows
             if r.get("extraction_issue", "none") != "none"
         )
+        post_think_values = [r.get("post_think_tokens", 0) for r in rows]
         out[mode] = {
             "n": len(rows),
             "passes": sum(1 for r in rows if r.get("pass")),
@@ -700,6 +706,8 @@ def build_failure_accounting(results: list[dict], active_modes: list[str]) -> di
             "failure_types": dict(failure_types),
             "extraction_methods": dict(extraction_methods),
             "extraction_issues": dict(extraction_issues),
+            "post_think_tokens_mean": sum(post_think_values) / max(len(post_think_values), 1),
+            "answer_channel_bloat": sum(1 for r in rows if r.get("answer_channel_bloat")),
         }
     return out
 
@@ -750,6 +758,7 @@ def print_failure_accounting(accounting: dict) -> None:
         a = accounting[mode]
         print(f"    {MODE_LABELS[mode]:<13s} failures: {a['failures']:>3d}  {_format_counts(a['failure_types'])}")
         print(f"    {'':<13s} extraction issues: {_format_counts(a['extraction_issues'])}")
+        print(f"    {'':<13s} post-think mean: {a['post_think_tokens_mean']:.0f}  bloat: {a['answer_channel_bloat']}")
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +792,8 @@ def main():
     p.add_argument("--max-tokens", type=int, default=8192)
     p.add_argument("--timeout", type=int, default=30,
                    help="Per-test execution timeout (seconds).")
+    p.add_argument("--bloat-threshold", type=int, default=2048,
+                   help="Post-think token threshold for answer_channel_bloat.")
 
     p.add_argument("--only", choices=["both", "all", "free", "fsm", "prompt_terse"], default="both",
                    help="'both' = FREE+FSM, 'all' = FREE+FSM+PROMPT_TERSE, or run one mode only.")
@@ -848,6 +859,8 @@ def main():
                 think = extract_think(text)
                 code, extraction = extract_code_with_info(text)
                 think_tokens = count_tokens(think, args.tokenizer)
+                total_tokens_int = int(total_tokens)
+                post_think_tokens = max(total_tokens_int - think_tokens, 0)
                 entry_found = _entry_point_found(code, args.dataset, entry_point, prob)
                 test_detail = ""
                 if args.dataset == "livecodebench":
@@ -876,7 +889,9 @@ def main():
                     "pass": passed,
                     "err": err[:200],
                     "think_tokens": think_tokens,
-                    "total_tokens": int(total_tokens),
+                    "total_tokens": total_tokens_int,
+                    "post_think_tokens": post_think_tokens,
+                    "answer_channel_bloat": post_think_tokens >= args.bloat_threshold,
                     "raw_response": text,
                     "extracted_think": think[:500],
                     "extracted_code": code[:500],
@@ -899,6 +914,8 @@ def main():
                     "extraction_method": "not_run",
                     "extraction_issue": "generation_error",
                     "entry_point_found": False,
+                    "post_think_tokens": 0,
+                    "answer_channel_bloat": False,
                 }
                 row[mode] = result
                 print(
@@ -950,14 +967,17 @@ def main():
         pass_rate = mean([1.0 if r["pass"] else 0.0 for r in rows])
         think_mean = mean([r.get("think_tokens", 0) for r in rows])
         total_mean = mean([r.get("total_tokens", 0) for r in rows])
+        post_think_mean = mean([r.get("post_think_tokens", 0) for r in rows])
         mode_summaries[mode] = {
             "pass_rate": pass_rate,
             "think_tokens_mean": think_mean,
             "total_tokens_mean": total_mean,
+            "post_think_tokens_mean": post_think_mean,
         }
         print(f"  {MODE_LABELS[mode]:<13s}:  pass@1 = {pass_rate*100:5.1f}%   "
               f"mean think = {think_mean:6.0f} tok   "
-              f"mean total = {total_mean:6.0f} tok")
+              f"mean total = {total_mean:6.0f} tok   "
+              f"post-think = {post_think_mean:6.0f} tok")
 
     if "free" in mode_summaries and "fsm" in mode_summaries:
         acc_delta = (mode_summaries["fsm"]["pass_rate"] - mode_summaries["free"]["pass_rate"]) * 100
@@ -1078,6 +1098,10 @@ def _write_per_problem_report(path: Path, results: list, problems: list, args) -
                 meta.append(f"extraction: `{d['extraction_issue']}`")
             if d.get("extraction_method"):
                 meta.append(f"method: `{d['extraction_method']}`")
+            if d.get("post_think_tokens") is not None:
+                meta.append(f"post-think: `{d['post_think_tokens']}`")
+            if d.get("answer_channel_bloat"):
+                meta.append("answer channel: `bloat`")
             if d.get("entry_point_found") is False:
                 meta.append("entry point: `not found`")
             if meta:
