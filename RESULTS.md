@@ -104,6 +104,45 @@ This is the central pattern: `FREE` and `PROMPT_TERSE` spend thousands of reason
 
 `PROMPT_TERSE` averages 2764 total tokens. It reduces verbosity somewhat, but not enough to behave like a controlled compression method.
 
+## LiveCodeBench early observation: reasoning displacement
+
+Early LiveCodeBench v6 runs on recent LeetCode-style public functional tests show a different failure pattern from HumanEval+. The current grammar reliably caps the explicit `<think>` block, but on harder tasks the model can move reasoning into the unconstrained answer/code region after `</think>`.
+
+Example logged pattern:
+
+| Task | Mode | Outcome | Think tokens | Total tokens | Notes |
+|---|---|---:|---:|---:|---|
+| 3715 | FSM | fail | 134 | 7609 | Short plan, very long answer/code region |
+| 3562 | FSM | fail | 190 | 7047 | Short plan, syntax failure deep in generated code |
+| 3634 | FSM | pass | 130 | (small enough to pass cleanly) | Compression behaves as intended |
+
+This is **reasoning displacement**: constraining the thought channel does not necessarily constrain total deliberation. If the problem is hard enough, the model may spend the missing reasoning budget in comments, pseudo-code, multiple drafts, or overly long code after the grammar becomes permissive.
+
+That makes total completion tokens a required guardrail metric. On HumanEval+, `FSM` compresses both think tokens and total tokens. On harder LiveCodeBench tasks, `FSM` may still compress think tokens while losing much of the total-token advantage.
+
+This suggests a next grammar iteration should constrain more of the response shape, not just the `<think>` prefix. A candidate coding grammar:
+
+    <think>
+    GOAL: ...
+    STATE: ...
+    ALGO: ...
+    EDGE: ...
+    VERIFY: ...
+    </think>
+
+    ```python
+    # final code only
+    ...
+    ```
+
+The goal is not to make the plan verbose. It is to give the model enough structured slots for harder tasks while preventing hidden scratchpad migration into the answer channel. For LiveCodeBench, useful reporting should include:
+
+- `think_tokens`
+- `total_tokens`
+- `post_think_tokens = total_tokens - think_tokens`
+- extraction failures such as `empty_code`
+- syntax/runtime failures caused by answer-channel bloat
+
 ## Methodology notes
 
 **Modes**
@@ -126,16 +165,18 @@ This is the central pattern: `FREE` and `PROMPT_TERSE` spend thousands of reason
 
 3. **One domain.** HumanEval+ is short-form Python function synthesis. Math, logic, planning, and long-horizon agentic tasks may need different compressed formats or may lose more accuracy.
 
-4. **Grammar specificity.** The `GOAL/APPROACH/EDGE` format was tuned for coding. It is a minimum viable grammar, not evidence of an optimal structure.
+4. **Grammar specificity.** The `GOAL/APPROACH/EDGE` format was tuned for short coding tasks. It is a minimum viable grammar, not evidence of an optimal structure. Early LiveCodeBench runs suggest that harder tasks may need a richer grammar that gives the model structured space for state, algorithm, edge cases, and verification.
 
 5. **Public benchmark scoring.** The run uses the dataset's available augmented tests. LiveCodeBench public functional tests are the next step, but should be labeled as public-test pass rate unless the official/private evaluator is wired in.
 
 ## Next runs
 
 1. **LiveCodeBench post-release subset.** For Qwen3.6, use `contest_date >= 2026-04-23` as the strict cutoff. If that yields too few problems, also run `contest_date >= 2026-03-01` and label it as recent-but-risky rather than clean.
-2. **MBPP+.** Bigger and messier than HumanEval+, useful as a second coding benchmark.
-3. **Smaller models.** Test whether grammar compression still works when the model has less latent capability.
-4. **Math / logic.** Try the same grammar and domain-specific grammars on GSM8K, MATH/AIME-style tasks, and logic benchmarks.
+2. **Measure reasoning displacement.** Add `post_think_tokens` and an `answer_channel_bloat` flag to the evaluator, especially for LiveCodeBench.
+3. **Richer coding grammar.** Test a `GOAL/STATE/ALGO/EDGE/VERIFY` grammar against the current `GOAL/APPROACH/EDGE` grammar.
+4. **MBPP+.** Bigger and messier than HumanEval+, useful as a second coding benchmark.
+5. **Smaller models.** Test whether grammar compression still works when the model has less latent capability.
+6. **Math / logic.** Try the same grammar and domain-specific grammars on GSM8K, MATH/AIME-style tasks, and logic benchmarks.
 
 ## Raw data
 
