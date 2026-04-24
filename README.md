@@ -57,6 +57,32 @@ print(':'.join(os.path.join(nv, d, 'lib') for d in os.listdir(nv)
 ")
 ```
 
+### Native llama-server (recommended for speed)
+
+For long generations, native `llama-server` is faster than `llama-cpp-python`, and can use llama.cpp speculative decoding:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git cmake build-essential libcurl4-openssl-dev
+
+git clone https://github.com/ggml-org/llama.cpp ~/llama.cpp
+cmake -S ~/llama.cpp -B ~/llama.cpp/build \
+    -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build ~/llama.cpp/build --config Release -j
+
+export PATH="$HOME/llama.cpp/build/bin:$PATH"
+llama-server --help | head
+```
+
+The repo includes [`run_llama_server.sh`](run_llama_server.sh), which defaults to:
+
+```bash
+llama-server -hf ggml-org/Qwen3.6-27B-GGUF --spec-default \
+    --host 127.0.0.1 --port 8000 -c 32768 -ngl 999 --flash-attn
+```
+
+The older [`run_server.sh`](run_server.sh) still starts `llama-cpp-python` and is kept for reproducing the original run.
+
 ### Model download
 
 ```bash
@@ -72,12 +98,20 @@ Two processes, two tmux panes.
 ### Pane 1 — start the server
 
 ```bash
-./run_server.sh
+./run_llama_server.sh
 # Or in background:
-# nohup ./run_server.sh > server.log 2>&1 &
+# nohup ./run_llama_server.sh > server.log 2>&1 &
 ```
 
-Auto-discovers the GGUF from `~/.cache/huggingface/hub/` or `~/models/`. Uses 8-bit KV cache (`q8_0`), flash attention, n_ctx=65536. Overrides via env vars `MODEL_PATH`, `N_CTX`, `PORT`, `KV_TYPE`.
+By default this downloads/serves `ggml-org/Qwen3.6-27B-GGUF` through native `llama-server` with `--spec-default`. Override with env vars:
+
+```bash
+HF_REPO=ggml-org/Qwen3.6-27B-GGUF N_CTX=32768 ./run_llama_server.sh
+MODEL_PATH=/path/to/model.gguf ./run_llama_server.sh
+KV_TYPE=q8_0 ./run_llama_server.sh
+```
+
+If you prefer the original Python server, use `./run_server.sh`. It auto-discovers the GGUF from `~/.cache/huggingface/hub/` or `~/models/`, uses 8-bit KV cache (`q8_0`), flash attention, and `n_ctx=65536`.
 
 ### Pane 2 — run the comparison
 
