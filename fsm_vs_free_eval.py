@@ -376,6 +376,18 @@ def _lcb_public_test_count(problem: dict) -> int:
         return 0
 
 
+def _with_lcb_prelude(code: str) -> str:
+    """Add the small ambient namespace LeetCode solutions normally assume."""
+    prelude = "from typing import *\n"
+    lines = code.splitlines()
+    insert_at = 0
+    while insert_at < len(lines) and lines[insert_at].startswith("from __future__ import "):
+        insert_at += 1
+    lines.insert(insert_at, prelude.rstrip("\n"))
+    suffix = "\n" if code.endswith("\n") else ""
+    return "\n".join(lines) + suffix
+
+
 def run_tests_livecodebench(code: str, problem: dict, timeout: int = 30) -> tuple[bool, str]:
     """Run a LCB functional-test problem via a generated harness.
 
@@ -397,7 +409,7 @@ def run_tests_livecodebench(code: str, problem: dict, timeout: int = 30) -> tupl
         return False, "no_tests"
 
     harness = (
-        code + "\n\n"
+        _with_lcb_prelude(code) + "\n\n"
         "import json as _json, sys as _sys\n"
         f"_tests = _json.loads({json.dumps(json.dumps(tests))})\n"
         f"_FN_NAME = {fn_name!r}\n"
@@ -503,6 +515,18 @@ def _entry_point_found(code: str, dataset: str, entry_point: str, problem: dict)
             return True
         return bool(re.search(rf"^\s*def\s+{re.escape(fn_name)}\s*\(", code, re.MULTILINE))
     return bool(re.search(rf"^\s*def\s+{re.escape(entry_point)}\s*\(", code, re.MULTILINE))
+
+
+def code_comment_metrics(code: str, tokenizer: str) -> dict:
+    lines = code.splitlines()
+    comment_lines = [ln.lstrip()[1:].strip() for ln in lines if ln.lstrip().startswith("#")]
+    comment_text = "\n".join(ln for ln in comment_lines if ln)
+    comment_tokens = count_tokens(comment_text, tokenizer) if comment_text else 0
+    return {
+        "code_lines": len(lines),
+        "code_comment_lines": len(comment_lines),
+        "code_comment_tokens": comment_tokens,
+    }
 
 
 def classify_failure(result: dict) -> str:
@@ -699,6 +723,7 @@ def build_failure_accounting(results: list[dict], active_modes: list[str]) -> di
             if r.get("extraction_issue", "none") != "none"
         )
         post_think_values = [r.get("post_think_tokens", 0) for r in rows]
+        comment_token_values = [r.get("code_comment_tokens", 0) for r in rows]
         out[mode] = {
             "n": len(rows),
             "passes": sum(1 for r in rows if r.get("pass")),
@@ -708,6 +733,8 @@ def build_failure_accounting(results: list[dict], active_modes: list[str]) -> di
             "extraction_issues": dict(extraction_issues),
             "post_think_tokens_mean": sum(post_think_values) / max(len(post_think_values), 1),
             "answer_channel_bloat": sum(1 for r in rows if r.get("answer_channel_bloat")),
+            "code_comment_tokens_mean": sum(comment_token_values) / max(len(comment_token_values), 1),
+            "comment_bloat": sum(1 for r in rows if r.get("comment_bloat")),
         }
     return out
 
@@ -759,6 +786,7 @@ def print_failure_accounting(accounting: dict) -> None:
         print(f"    {MODE_LABELS[mode]:<13s} failures: {a['failures']:>3d}  {_format_counts(a['failure_types'])}")
         print(f"    {'':<13s} extraction issues: {_format_counts(a['extraction_issues'])}")
         print(f"    {'':<13s} post-think mean: {a['post_think_tokens_mean']:.0f}  bloat: {a['answer_channel_bloat']}")
+        print(f"    {'':<13s} comment mean: {a['code_comment_tokens_mean']:.0f}  bloat: {a['comment_bloat']}")
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +822,8 @@ def main():
                    help="Per-test execution timeout (seconds).")
     p.add_argument("--bloat-threshold", type=int, default=2048,
                    help="Post-think token threshold for answer_channel_bloat.")
+    p.add_argument("--comment-bloat-threshold", type=int, default=1024,
+                   help="Code-comment token threshold for comment_bloat.")
 
     p.add_argument("--only", choices=["both", "all", "free", "fsm", "prompt_terse"], default="both",
                    help="'both' = FREE+FSM, 'all' = FREE+FSM+PROMPT_TERSE, or run one mode only.")
@@ -861,6 +891,7 @@ def main():
                 think_tokens = count_tokens(think, args.tokenizer)
                 total_tokens_int = int(total_tokens)
                 post_think_tokens = max(total_tokens_int - think_tokens, 0)
+                comment_metrics = code_comment_metrics(code, args.tokenizer)
                 entry_found = _entry_point_found(code, args.dataset, entry_point, prob)
                 test_detail = ""
                 if args.dataset == "livecodebench":
@@ -892,6 +923,8 @@ def main():
                     "total_tokens": total_tokens_int,
                     "post_think_tokens": post_think_tokens,
                     "answer_channel_bloat": post_think_tokens >= args.bloat_threshold,
+                    **comment_metrics,
+                    "comment_bloat": comment_metrics["code_comment_tokens"] >= args.comment_bloat_threshold,
                     "raw_response": text,
                     "extracted_think": think[:500],
                     "extracted_code": code[:500],
@@ -916,6 +949,10 @@ def main():
                     "entry_point_found": False,
                     "post_think_tokens": 0,
                     "answer_channel_bloat": False,
+                    "code_lines": 0,
+                    "code_comment_lines": 0,
+                    "code_comment_tokens": 0,
+                    "comment_bloat": False,
                 }
                 row[mode] = result
                 print(
@@ -968,16 +1005,19 @@ def main():
         think_mean = mean([r.get("think_tokens", 0) for r in rows])
         total_mean = mean([r.get("total_tokens", 0) for r in rows])
         post_think_mean = mean([r.get("post_think_tokens", 0) for r in rows])
+        comment_mean = mean([r.get("code_comment_tokens", 0) for r in rows])
         mode_summaries[mode] = {
             "pass_rate": pass_rate,
             "think_tokens_mean": think_mean,
             "total_tokens_mean": total_mean,
             "post_think_tokens_mean": post_think_mean,
+            "code_comment_tokens_mean": comment_mean,
         }
         print(f"  {MODE_LABELS[mode]:<13s}:  pass@1 = {pass_rate*100:5.1f}%   "
               f"mean think = {think_mean:6.0f} tok   "
               f"mean total = {total_mean:6.0f} tok   "
-              f"post-think = {post_think_mean:6.0f} tok")
+              f"post-think = {post_think_mean:6.0f} tok   "
+              f"comments = {comment_mean:6.0f} tok")
 
     if "free" in mode_summaries and "fsm" in mode_summaries:
         acc_delta = (mode_summaries["fsm"]["pass_rate"] - mode_summaries["free"]["pass_rate"]) * 100
@@ -1102,6 +1142,10 @@ def _write_per_problem_report(path: Path, results: list, problems: list, args) -
                 meta.append(f"post-think: `{d['post_think_tokens']}`")
             if d.get("answer_channel_bloat"):
                 meta.append("answer channel: `bloat`")
+            if d.get("code_comment_tokens") is not None:
+                meta.append(f"comment tokens: `{d['code_comment_tokens']}`")
+            if d.get("comment_bloat"):
+                meta.append("comments: `bloat`")
             if d.get("entry_point_found") is False:
                 meta.append("entry point: `not found`")
             if meta:

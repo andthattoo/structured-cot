@@ -143,15 +143,28 @@ The repo now keeps three LiveCodeBench grammar variants:
 - `fsm_grammar_lcb_fenced.gbnf`: richer plan plus exactly one fenced Python block; comments allowed, backticks disallowed.
 - `fsm_grammar_lcb.gbnf`: strictest version; one fenced Python block, no `#` comments, no backticks.
 
+Early 10-problem `fsm_grammar_lcb_fenced.gbnf` run:
+
+| Metric | Value |
+|---|---:|
+| pass@1 | 2 / 10 = 20.0% |
+| mean think tokens | 411 |
+| mean total tokens | 2944 |
+| mean post-think tokens | 2534 |
+| answer-channel bloat | 2 / 10 |
+
+This is not a good accuracy result, but it is a useful failure probe. The fenced grammar reduces some of the worst multi-draft markdown behavior, yet comments become an escape hatch: the model can continue its scratchpad as `# ...` lines inside the Python block. That is why the evaluator now tracks comment-token bloat separately. Re-run these LCB numbers before treating them as final because the local harness now injects `from typing import *`, matching common LeetCode-style ambient type hints and removing false `List`/`Optional` failures.
+
 For LiveCodeBench, useful reporting should include:
 
 - `think_tokens`
 - `total_tokens`
 - `post_think_tokens = total_tokens - think_tokens`
+- `code_comment_tokens`
 - extraction failures such as `empty_code`
 - syntax/runtime failures caused by answer-channel bloat
 
-The evaluator now records `post_think_tokens = total_tokens - think_tokens` and an `answer_channel_bloat` flag using `--bloat-threshold` (default: 2048). That makes this failure mode visible in `summary.json` and `per_problem.md`.
+The evaluator now records `post_think_tokens = total_tokens - think_tokens` and an `answer_channel_bloat` flag using `--bloat-threshold` (default: 2048). It also records `code_comment_tokens` and `comment_bloat` using `--comment-bloat-threshold` (default: 1024). That makes this failure mode visible in `summary.json` and `per_problem.md`.
 
 Recommended A/B:
 

@@ -175,6 +175,8 @@ Each run produces in `fsm_vs_free/`:
 The summary also reports `post_think_tokens_mean` and `answer_channel_bloat`,
 which are useful on LiveCodeBench because a model can obey a short `<think>`
 grammar while moving the missing scratchpad into the answer/code channel.
+It also reports `code_comment_tokens_mean` and `comment_bloat`, since the
+fenced grammar can still displace reasoning into Python comments.
 
 ## Architecture notes
 
