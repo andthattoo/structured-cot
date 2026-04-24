@@ -178,6 +178,22 @@ Shared rollouts reveal two separate displacement channels:
 
 The bounded no-comments grammar targets both: it removes comments/backticks in the answer and caps each planning line at 240 characters using GBNF repetition ranges.
 
+Initial 10-problem `fsm_grammar_lcb_bounded_no_comments.gbnf` run:
+
+| Metric | Value |
+|---|---:|
+| pass@1 | 1 / 10 = 10.0% |
+| mean think tokens | 143 |
+| mean total tokens | 3602 |
+| mean post-think tokens | 3459 |
+| mean comment tokens | 0 |
+| answer-channel bloat | 4 / 10 |
+| comment bloat | 0 / 10 |
+| prose-before-code extraction | 8 / 10 |
+| generation errors | 2 / 10 |
+
+This showed that removing comments does remove the comment scratchpad, but the model then moved reasoning into raw answer prose. It also exposed a prompt confound: this grammar forbids backticks, while the shared FSM prompt still asked the model to return a fenced code block. The evaluator now switches to a direct-code prompt for grammars that cannot emit markdown fences. Treat the first bounded-no-comments result as diagnostic only and rerun after that prompt fix.
+
 For LiveCodeBench, useful reporting should include:
 
 - `think_tokens`

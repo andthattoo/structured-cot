@@ -190,6 +190,10 @@ grammar while moving the missing scratchpad into the answer/code channel.
 It also reports `code_comment_tokens_mean` and `comment_bloat`, since the
 fenced grammar can still displace reasoning into Python comments.
 
+For grammars that disallow backticks, the evaluator automatically switches the
+FSM prompt from fenced-code output to direct-code output so the prompt does not
+ask for a markdown fence the grammar cannot emit.
+
 ## Architecture notes
 
 Qwen3.6-35B-A3B is a **MoE hybrid**:

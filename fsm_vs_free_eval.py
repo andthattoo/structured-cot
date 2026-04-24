@@ -144,6 +144,13 @@ SYSTEM_PROMPT = (
     "Wrap your final code in a ```python ... ``` fenced block."
 )
 
+DIRECT_CODE_SYSTEM_PROMPT = (
+    "You are an expert Python programmer. Think only inside the required "
+    "<think> block. After </think>, output runnable Python code directly. "
+    "Do not use Markdown fences. Do not write prose, scratch work, or comments "
+    "after </think>, even if the task prompt mentions a fenced code block."
+)
+
 PROMPT_TERSE_SYSTEM_PROMPT = (
     "You are an expert Python programmer.  Think carefully but tersely.  "
     "Use exactly this thinking format before the final answer:\n"
@@ -162,6 +169,35 @@ MODE_LABELS = {
     "fsm": "FSM",
     "prompt_terse": "PROMPT_TERSE",
 }
+
+
+def grammar_allows_markdown_fence(grammar: str) -> bool:
+    """Best-effort check for whether the FSM answer grammar can emit ``` fences."""
+    return "```python" in grammar or r"\x20-\x7E" in grammar
+
+
+def fsm_system_prompt_for_grammar(grammar: str) -> str:
+    if grammar_allows_markdown_fence(grammar):
+        return SYSTEM_PROMPT
+    return DIRECT_CODE_SYSTEM_PROMPT
+
+
+def fsm_user_prompt_for_grammar(user_prompt: str, grammar: str) -> str:
+    if grammar_allows_markdown_fence(grammar):
+        return user_prompt
+    replacements = [
+        (
+            "Return only runnable code in a ```python``` block.",
+            "Return only runnable Python code directly, with no Markdown fences, comments, or explanatory prose.",
+        ),
+        (
+            "Return only runnable code in a ```python ... ``` fenced block.",
+            "Return only runnable Python code directly, with no Markdown fences, comments, or explanatory prose.",
+        ),
+    ]
+    for old, new in replacements:
+        user_prompt = user_prompt.replace(old, new)
+    return user_prompt
 
 
 def build_user_prompt(problem: dict, dataset: str) -> str:
@@ -632,12 +668,19 @@ def generate_prompt_terse(client, model: str, user_prompt: str, max_tokens: int)
     return text, completion_tokens
 
 
-def generate_fsm(client, model: str, user_prompt: str, grammar: str, max_tokens: int) -> tuple[str, int]:
+def generate_fsm(
+    client,
+    model: str,
+    user_prompt: str,
+    grammar: str,
+    max_tokens: int,
+    system_prompt: str,
+) -> tuple[str, int]:
     """Chat completion with GBNF grammar applied to the whole assistant response."""
     r = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         max_tokens=max_tokens,
@@ -834,9 +877,11 @@ def main():
 
     active_modes = modes_to_run(args.only)
     grammar = ""
+    fsm_system_prompt = SYSTEM_PROMPT
     if "fsm" in active_modes:
         try:
             grammar = Path(args.grammar_file).read_text()
+            fsm_system_prompt = fsm_system_prompt_for_grammar(grammar)
         except Exception as e:
             print(f"ERROR: could not read grammar file {args.grammar_file}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -874,7 +919,15 @@ def main():
             if mode == "free":
                 return generate_free(client, args.model, user_prompt, args.max_tokens)
             if mode == "fsm":
-                return generate_fsm(client, args.model, user_prompt, grammar, args.max_tokens)
+                fsm_user_prompt = fsm_user_prompt_for_grammar(user_prompt, grammar)
+                return generate_fsm(
+                    client,
+                    args.model,
+                    fsm_user_prompt,
+                    grammar,
+                    args.max_tokens,
+                    fsm_system_prompt,
+                )
             if mode == "prompt_terse":
                 return generate_prompt_terse(client, args.model, user_prompt, args.max_tokens)
             raise ValueError(mode)
