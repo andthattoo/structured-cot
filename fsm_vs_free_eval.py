@@ -547,6 +547,18 @@ def make_client(args):
     return client
 
 
+def message_text(message) -> str:
+    """Return visible content, preserving separated reasoning when servers expose it."""
+    content = message.content or ""
+    reasoning = getattr(message, "reasoning_content", None)
+    if not reasoning:
+        extra = getattr(message, "model_extra", None) or {}
+        reasoning = extra.get("reasoning_content") or extra.get("reasoning")
+    if reasoning:
+        return f"<think>\n{str(reasoning).strip()}\n</think>\n\n{content}"
+    return content
+
+
 def generate_free(client, model: str, user_prompt: str, max_tokens: int) -> tuple[str, int]:
     """Standard chat completion — no grammar, no constraint."""
     r = client.chat.completions.create(
@@ -558,7 +570,7 @@ def generate_free(client, model: str, user_prompt: str, max_tokens: int) -> tupl
         max_tokens=max_tokens,
         temperature=0.0,
     )
-    text = r.choices[0].message.content or ""
+    text = message_text(r.choices[0].message)
     completion_tokens = r.usage.completion_tokens if r.usage else count_tokens(text, model)
     return text, completion_tokens
 
@@ -574,7 +586,7 @@ def generate_prompt_terse(client, model: str, user_prompt: str, max_tokens: int)
         max_tokens=max_tokens,
         temperature=0.0,
     )
-    text = r.choices[0].message.content or ""
+    text = message_text(r.choices[0].message)
     completion_tokens = r.usage.completion_tokens if r.usage else count_tokens(text, model)
     return text, completion_tokens
 
@@ -591,7 +603,7 @@ def generate_fsm(client, model: str, user_prompt: str, grammar: str, max_tokens:
         temperature=0.0,
         extra_body={"grammar": grammar},
     )
-    text = r.choices[0].message.content or ""
+    text = message_text(r.choices[0].message)
     completion_tokens = r.usage.completion_tokens if r.usage else count_tokens(text, model)
     return text, completion_tokens
 

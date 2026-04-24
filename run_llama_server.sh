@@ -17,6 +17,7 @@
 #   N_GPU_LAYERS     — GPU layers to offload (default: 999)
 #   FLASH_ATTN       — on/off/auto, or 1/0 for on/off (default: on)
 #   SPEC_DEFAULT     — 1 to pass --spec-default (default: 1)
+#   REASONING_FORMAT — none keeps <think> in message.content (default: none)
 #   KV_TYPE          — optional KV cache type, e.g. q8_0 or q4_0
 #   BACKGROUND       — 1 to start with nohup and return (default: 0)
 #   LOG_FILE         — log path for BACKGROUND=1 (default: server.log)
@@ -36,6 +37,7 @@ HOST="${HOST:-127.0.0.1}"
 N_GPU_LAYERS="${N_GPU_LAYERS:-999}"
 FLASH_ATTN="${FLASH_ATTN:-on}"
 SPEC_DEFAULT="${SPEC_DEFAULT:-1}"
+REASONING_FORMAT="${REASONING_FORMAT:-none}"
 BACKGROUND="${BACKGROUND:-0}"
 LOG_FILE="${LOG_FILE:-server.log}"
 PID_FILE="${PID_FILE:-server.pid}"
@@ -95,6 +97,10 @@ if [ "${SPEC_DEFAULT}" = "1" ]; then
     ARGS+=(--spec-default)
 fi
 
+if [ -n "${REASONING_FORMAT}" ]; then
+    ARGS+=(--reasoning-format "${REASONING_FORMAT}")
+fi
+
 if [ -n "${KV_TYPE:-}" ]; then
     ARGS+=(--cache-type-k "${KV_TYPE}" --cache-type-v "${KV_TYPE}")
 fi
@@ -110,6 +116,7 @@ echo "  host:port  = ${HOST}:${PORT}"
 echo "  gpu_layers = ${N_GPU_LAYERS}"
 echo "  flash_attn = ${FLASH_ATTN_ARG}"
 echo "  spec       = ${SPEC_DEFAULT}"
+echo "  reasoning  = ${REASONING_FORMAT:-auto}"
 if [ -n "${KV_TYPE:-}" ]; then
     echo "  kv_type    = ${KV_TYPE}"
 fi

@@ -78,7 +78,8 @@ The repo includes [`run_llama_server.sh`](run_llama_server.sh), which defaults t
 
 ```bash
 llama-server -hf ggml-org/Qwen3.6-27B-GGUF --spec-default \
-    --host 127.0.0.1 --port 8000 -c 32768 -ngl 999 --flash-attn on
+    --host 127.0.0.1 --port 8000 -c 32768 -ngl 999 \
+    --flash-attn on --reasoning-format none
 ```
 
 The older [`run_server.sh`](run_server.sh) still starts `llama-cpp-python` and is kept for reproducing the original run.
@@ -103,12 +104,13 @@ tail -f server.log
 curl http://127.0.0.1:8000/v1/models
 ```
 
-By default this downloads/serves `ggml-org/Qwen3.6-27B-GGUF` through native `llama-server` with `--spec-default`. Override with env vars:
+By default this downloads/serves `ggml-org/Qwen3.6-27B-GGUF` through native `llama-server` with `--spec-default` and `--reasoning-format none`, so `<think>...</think>` remains visible for token accounting. Override with env vars:
 
 ```bash
 HF_REPO=ggml-org/Qwen3.6-27B-GGUF N_CTX=32768 BACKGROUND=1 ./run_llama_server.sh
 MODEL_PATH=/path/to/model.gguf BACKGROUND=1 ./run_llama_server.sh
 KV_TYPE=q8_0 BACKGROUND=1 ./run_llama_server.sh
+REASONING_FORMAT=deepseek-legacy BACKGROUND=1 ./run_llama_server.sh
 ```
 
 Background mode writes `server.log` and `server.pid`. Stop it with:
