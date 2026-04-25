@@ -9,6 +9,7 @@ env/
 # Eval outputs
 fsm_vs_free/
 *.jsonl
+animations/
 
 # Model cache
 *.gguf

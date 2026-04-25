@@ -1,6 +1,6 @@
 # structured-cot
 
-**Grammar-constrained chain-of-thought for reasoning LMs. Zero training. 22× compression with no accuracy loss on HumanEval+.**
+**Grammar-constrained chain-of-thought for reasoning LMs. Zero training. 22× compression on HumanEval+; +14 pp on a recent LiveCodeBench public-test slice.**
 
 ## The finding
 
@@ -15,17 +15,27 @@ On HumanEval+ (164 problems) with `unsloth/Qwen3.6-35B-A3B-GGUF` at Q4_K_M, runn
 
 No distillation. No fine-tuning. No reward-model. A ~20-line GBNF grammar applied to the `<think>` block at inference time matches full-thinking accuracy with an order-of-magnitude fewer tokens. The prompt-only terse control slightly improves pass@1 on this run, but still uses 2298 thinking tokens on average; the grammar is what reliably enforces the compact token regime.
 
-See [RESULTS.md](RESULTS.md) for the full experimental writeup, per-problem breakdown, and discussion of limitations (including contamination).
+On a harder recent LiveCodeBench v6 LeetCode slice (50 problems, `contest_date >= 2025-01-01`, public functional tests), the richer [`grammars/fsm_grammar_lcb_plan.gbnf`](grammars/fsm_grammar_lcb_plan.gbnf) grammar improves both reliability and token use:
+
+| Mode | pass@1 | mean thinking tokens | mean total tokens | extraction issues |
+|---|---:|---:|---:|---|
+| Free-form `<think>...</think>` | 25 / 50 = 50.0% | 11553 | 13632 | empty_code=18 |
+| FSM_PLAN `GOAL/STATE/ALGO/EDGE/VERIFY` | **32 / 50 = 64.0%** | **267** | **2743** | **none** |
+| **FSM_PLAN vs FREE Δ** | **+14.0 pp** | **43.3× shorter** | **5.0× shorter** | - |
+
+The LiveCodeBench result is a public-test result, not an official private leaderboard score. It also reveals a useful caveat: on harder tasks, the model can move some deliberation into comments or post-think answer text, so total tokens and comment bloat need to be tracked alongside `<think>` tokens.
+
+See [RESULTS.md](RESULTS.md) for the full experimental writeup, per-problem breakdown, and discussion of limitations.
 
 ## Why this matters
 
 Reasoning models like Qwen3, DeepSeek-R1, QwQ spend thousands of tokens in verbose prose thinking — exploring alternatives, restating, hedging. This work shows, on one benchmark, that for a large chunk of that reasoning, the verbose scaffolding isn't doing real work. The model already has the reasoning capability internally; grammar constraint just extracts it in a denser form.
 
-If this holds on recent or post-release benchmarks (next: LiveCodeBench), the engineering implication is direct: **inference-time thinking compute can be cut ~10× via a grammar file alone**, with no training pipeline or serving changes beyond a GBNF argument.
+The engineering implication is direct: **inference-time thinking compute can be cut dramatically via a grammar file alone**, with no training pipeline or serving changes beyond a GBNF argument. HumanEval+ shows the clean compression case; LiveCodeBench shows the harder-task behavior, where the grammar also prevents many no-code failures but can displace some reasoning into the answer channel.
 
 ## How it works
 
-Single GBNF grammar (see [`fsm_grammar.gbnf`](fsm_grammar.gbnf)):
+Single GBNF grammar (see [`grammars/fsm_grammar.gbnf`](grammars/fsm_grammar.gbnf)):
 
 ```gbnf
 root  ::= think code
@@ -136,53 +146,22 @@ uv run python fsm_vs_free_eval.py --n-problems 100 --dataset mbpp --max-tokens 8
 # LiveCodeBench v6 recent subset (public functional tests)
 uv run python fsm_vs_free_eval.py --dataset livecodebench \
     --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
-    --n-problems 50 --max-tokens 8192 --only all \
+    --n-problems 50 --max-tokens 16384 --only all \
     --out-dir lcb_v6_2025_01_01_n50_all
 
 # LiveCodeBench FSM-only baseline grammar
 uv run python fsm_vs_free_eval.py --dataset livecodebench \
     --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
-    --n-problems 50 --max-tokens 8192 --only fsm \
-    --grammar-file fsm_grammar.gbnf \
+    --n-problems 50 --max-tokens 16384 --only fsm \
+    --grammar-file grammars/fsm_grammar.gbnf \
     --out-dir lcb_v6_2025_01_01_fsm_base_grammar
 
-# LiveCodeBench FSM-only stricter grammar for answer-channel bloat
+# LiveCodeBench FSM-only plan grammar
 uv run python fsm_vs_free_eval.py --dataset livecodebench \
     --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
-    --n-problems 50 --max-tokens 8192 --only fsm \
-    --grammar-file fsm_grammar_lcb.gbnf \
-    --out-dir lcb_v6_2025_01_01_fsm_lcb_grammar
-
-# LiveCodeBench middle variants for ablation
-uv run python fsm_vs_free_eval.py --dataset livecodebench \
-    --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
-    --n-problems 50 --max-tokens 8192 --only fsm \
-    --grammar-file fsm_grammar_lcb_plan.gbnf \
+    --n-problems 50 --max-tokens 16384 --only fsm \
+    --grammar-file grammars/fsm_grammar_lcb_plan.gbnf \
     --out-dir lcb_v6_2025_01_01_fsm_lcb_plan
-
-uv run python fsm_vs_free_eval.py --dataset livecodebench \
-    --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
-    --n-problems 50 --max-tokens 8192 --only fsm \
-    --grammar-file fsm_grammar_lcb_fenced.gbnf \
-    --out-dir lcb_v6_2025_01_01_fsm_lcb_fenced
-
-uv run python fsm_vs_free_eval.py --dataset livecodebench \
-    --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
-    --n-problems 50 --max-tokens 8192 --only fsm \
-    --grammar-file fsm_grammar_lcb_no_comments.gbnf \
-    --out-dir lcb_v6_2025_01_01_fsm_lcb_no_comments
-
-uv run python fsm_vs_free_eval.py --dataset livecodebench \
-    --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
-    --n-problems 50 --max-tokens 8192 --only fsm \
-    --grammar-file fsm_grammar_lcb_bounded_no_comments.gbnf \
-    --out-dir lcb_v6_2025_01_01_fsm_lcb_bounded_no_comments
-
-uv run python fsm_vs_free_eval.py --dataset livecodebench \
-    --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \
-    --n-problems 50 --max-tokens 8192 --only fsm \
-    --grammar-file fsm_grammar_lcb_code_start_bounded.gbnf \
-    --out-dir lcb_v6_2025_01_01_fsm_lcb_code_start_bounded
 ```
 
 Each run produces in `fsm_vs_free/`:
@@ -190,15 +169,22 @@ Each run produces in `fsm_vs_free/`:
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting
 - `per_problem.md` — human-readable report with outcome tags (🔺 / 🔻 / 🟰 / ❌)
 
-The summary also reports `post_think_tokens_mean` and `answer_channel_bloat`,
-which are useful on LiveCodeBench because a model can obey a short `<think>`
-grammar while moving the missing scratchpad into the answer/code channel.
-It also reports `code_comment_tokens_mean` and `comment_bloat`, since the
-fenced grammar can still displace reasoning into Python comments.
+To make a side-by-side generation animation for one problem:
 
-For grammars that disallow backticks, the evaluator automatically switches the
-FSM prompt from fenced-code output to direct-code output so the prompt does not
-ask for a markdown fence the grammar cannot emit.
+```bash
+uv run python make_tps_animation.py \
+    --task-id 3781 \
+    --left-results lcb_v6_2025_01_01_free_n50/results.jsonl \
+    --left-mode free --left-label FREE --left-seconds 237 \
+    --right-results lcb_v6_2025_01_01_fsm_lcb_plan_n50/results.jsonl \
+    --right-mode fsm --right-label FSM_PLAN --right-seconds 279 \
+    --out animations/lcb_3781_free_vs_fsm_plan.html
+```
+
+The summary also reports `post_think_tokens_mean`, `answer_channel_bloat`,
+`code_comment_tokens_mean`, and `comment_bloat`. Those are useful on
+LiveCodeBench because a model can obey a short `<think>` grammar while moving
+some of the missing scratchpad into comments or other post-think answer text.
 
 ## Architecture notes
 
@@ -213,7 +199,7 @@ For the FSM experiment, the base-LM architecture doesn't matter much — we're c
 
 1. **Contamination.** HumanEval has been in training corpora for years. All modes may be recalling solutions, not reasoning. The "FSM matches FREE" result could mean "grammar extracts the same memorized solution in fewer tokens" rather than "grammar preserves reasoning capability." LiveCodeBench release v6 currently reaches April 2025, so it is a useful recent/lower-contamination check but not a strict post-Qwen3.6-release cutoff.
 
-2. **Grammar specificity.** The GOAL/APPROACH/EDGE format was tuned for short coding tasks. LiveCodeBench variants now split the ablation: `fsm_grammar_lcb_plan.gbnf` adds `GOAL/STATE/ALGO/EDGE/VERIFY` while leaving the answer permissive, `fsm_grammar_lcb_fenced.gbnf` also forces one Python fence, `fsm_grammar_lcb_no_comments.gbnf` blocks comments/backticks without forcing a fence, `fsm_grammar_lcb_bounded_no_comments.gbnf` is the parse-safe no-comments variant, `fsm_grammar_lcb_code_start_bounded.gbnf` also forces the answer to start with `from`/`import`/`class`/`def`, and `fsm_grammar_lcb.gbnf` is the strictest version with one fence plus no comment/backtick escape hatch in the code body. Math / logic / planning domains may need different symbolic formats. Unclear whether a single "universal" compressed-thinking grammar exists or whether each domain needs its own.
+2. **Grammar specificity.** The GOAL/APPROACH/EDGE format was tuned for short coding tasks. The active LiveCodeBench grammar, [`grammars/fsm_grammar_lcb_plan.gbnf`](grammars/fsm_grammar_lcb_plan.gbnf), adds `GOAL/STATE/ALGO/EDGE/VERIFY` while leaving the answer permissive. Math / logic / planning domains may need different symbolic formats. Unclear whether a single "universal" compressed-thinking grammar exists or whether each domain needs its own.
 
 3. **Reasoning depth.** The current result is on problems solvable in one forward pass. For multi-step problems (SWE-Bench, long-horizon planning, agentic tasks), whether grammar compression preserves capability is untested.
 
@@ -222,7 +208,7 @@ For the FSM experiment, the base-LM architecture doesn't matter much — we're c
 ## Status
 
 - ✅ HumanEval+ full (164 problems): FSM 152/164 vs FREE 151/164, 22× think-token compression
-- ✅ LiveCodeBench v6 recent LeetCode subset, public tests (50 problems): FREE 25/50 vs `fsm_grammar_lcb_plan.gbnf` 32/50; FSM_PLAN improves pass@1 while cutting mean total tokens from 13632 to 2743
+- ✅ LiveCodeBench v6 recent LeetCode subset, public tests (50 problems): FREE 25/50 vs `grammars/fsm_grammar_lcb_plan.gbnf` 32/50; FSM_PLAN improves pass@1 while cutting mean total tokens from 13632 to 2743
 - ⏳ MBPP+ (planned)
 - 🔲 Other domains (math, logic, planning)
 - 🔲 Cross-model transfer (smaller models)

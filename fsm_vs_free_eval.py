@@ -39,7 +39,7 @@ Usage:
   # LiveCodeBench FSM-only A/B with a stricter coding grammar
   uv run python fsm_vs_free_eval.py --dataset livecodebench \\
       --lcb-version release_v6 --date-cutoff 2025-01-01 --platform leetcode \\
-      --n-problems 50 --only fsm --grammar-file fsm_grammar_lcb.gbnf
+      --n-problems 50 --only fsm --grammar-file grammars/fsm_grammar_lcb_plan.gbnf
 
   # Free-only or FSM-only (for debugging)
   uv run python fsm_vs_free_eval.py --only free --n-problems 10
@@ -882,7 +882,7 @@ def main():
     p.add_argument("--platform", default="leetcode",
                    help="LCB platform filter: leetcode / atcoder / codeforces. "
                         "Empty string = no platform filter.")
-    p.add_argument("--grammar-file", default="fsm_grammar.gbnf")
+    p.add_argument("--grammar-file", default="grammars/fsm_grammar.gbnf")
     p.add_argument("--max-tokens", type=int, default=8192)
     p.add_argument("--timeout", type=int, default=30,
                    help="Per-test execution timeout (seconds).")
