@@ -33,6 +33,24 @@ root ::= "<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris
 '''
 
 
+THINK_FREE_TAIL_GRAMMAR = r'''
+root ::= think free_tail
+think ::= "<think>\n" "GOAL: " line "TOOL: " line "ARGS: " line "</think>\n"
+line ::= [^\n]+ "\n"
+free_tail ::= [\x09\x0A\x0D\x20-\x7E]+
+'''
+
+
+THINK_HERMES_JSON_GRAMMAR = r'''
+root ::= think tool_call
+think ::= "<think>\n" "GOAL: " line "TOOL: " line "ARGS: " line "</think>\n"
+line ::= [^\n]+ "\n"
+tool_call ::= "<tool_call>\n" tool_json "\n</tool_call>"
+tool_json ::= "{\"name\":\"get_weather\",\"arguments\":{\"city\":" city "}}"
+city ::= "\"Paris\"" | "\"London\"" | "\"Tokyo\""
+'''
+
+
 TOOL_SCHEMA = [
     {
         "type": "function",
@@ -162,6 +180,8 @@ def make_payload(
         "tools_plus_answer_grammar",
         "tools_plus_tool_xml_grammar",
         "tools_plus_hermes_json_grammar",
+        "tools_plus_think_free_tail_grammar",
+        "tools_plus_think_hermes_json_grammar",
     }
 
     if case_name in tool_cases:
@@ -176,6 +196,10 @@ def make_payload(
         add_grammar(payload, TOOL_CALL_XML_GRAMMAR, server)
     elif case_name == "tools_plus_hermes_json_grammar":
         add_grammar(payload, TOOL_CALL_HERMES_JSON_GRAMMAR, server)
+    elif case_name == "tools_plus_think_free_tail_grammar":
+        add_grammar(payload, THINK_FREE_TAIL_GRAMMAR, server)
+    elif case_name == "tools_plus_think_hermes_json_grammar":
+        add_grammar(payload, THINK_HERMES_JSON_GRAMMAR, server)
 
     return payload
 
@@ -200,6 +224,8 @@ def main() -> int:
         "tools_plus_answer_grammar",
         "tools_plus_tool_xml_grammar",
         "tools_plus_hermes_json_grammar",
+        "tools_plus_think_free_tail_grammar",
+        "tools_plus_think_hermes_json_grammar",
     ])
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -220,6 +246,8 @@ def main() -> int:
         "tools_plus_answer_grammar",
         "tools_plus_tool_xml_grammar",
         "tools_plus_hermes_json_grammar",
+        "tools_plus_think_free_tail_grammar",
+        "tools_plus_think_hermes_json_grammar",
     ]
 
     chat_url = base_url + "/chat/completions"
