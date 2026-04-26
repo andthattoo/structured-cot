@@ -51,6 +51,15 @@ city ::= "\"Paris\"" | "\"London\"" | "\"Tokyo\""
 '''
 
 
+THINK_QWEN3_XML_GRAMMAR = r'''
+root ::= think tool_call
+think ::= "<think>\n" "GOAL: " line "TOOL: " line "ARGS: " line "</think>\n"
+line ::= [^\n]+ "\n"
+tool_call ::= "<tool_call>\n<function=get_weather>\n<parameter=city>\n" city "\n</parameter>\n</function>\n</tool_call>"
+city ::= "Paris" | "London" | "Tokyo"
+'''
+
+
 TOOL_SCHEMA = [
     {
         "type": "function",
@@ -182,6 +191,7 @@ def make_payload(
         "tools_plus_hermes_json_grammar",
         "tools_plus_think_free_tail_grammar",
         "tools_plus_think_hermes_json_grammar",
+        "tools_plus_think_qwen3_xml_grammar",
     }
 
     if case_name in tool_cases:
@@ -200,6 +210,8 @@ def make_payload(
         add_grammar(payload, THINK_FREE_TAIL_GRAMMAR, server)
     elif case_name == "tools_plus_think_hermes_json_grammar":
         add_grammar(payload, THINK_HERMES_JSON_GRAMMAR, server)
+    elif case_name == "tools_plus_think_qwen3_xml_grammar":
+        add_grammar(payload, THINK_QWEN3_XML_GRAMMAR, server)
 
     return payload
 
@@ -226,6 +238,7 @@ def main() -> int:
         "tools_plus_hermes_json_grammar",
         "tools_plus_think_free_tail_grammar",
         "tools_plus_think_hermes_json_grammar",
+        "tools_plus_think_qwen3_xml_grammar",
     ])
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -248,6 +261,7 @@ def main() -> int:
         "tools_plus_hermes_json_grammar",
         "tools_plus_think_free_tail_grammar",
         "tools_plus_think_hermes_json_grammar",
+        "tools_plus_think_qwen3_xml_grammar",
     ]
 
     chat_url = base_url + "/chat/completions"
