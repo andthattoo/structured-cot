@@ -28,6 +28,11 @@ root ::= "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parame
 '''
 
 
+TOOL_CALL_HERMES_JSON_GRAMMAR = r'''
+root ::= "<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"
+'''
+
+
 TOOL_SCHEMA = [
     {
         "type": "function",
@@ -152,7 +157,14 @@ def make_payload(
         "max_tokens": max_tokens,
     }
 
-    if case_name in {"tools_only", "tools_plus_answer_grammar", "tools_plus_tool_xml_grammar"}:
+    tool_cases = {
+        "tools_only",
+        "tools_plus_answer_grammar",
+        "tools_plus_tool_xml_grammar",
+        "tools_plus_hermes_json_grammar",
+    }
+
+    if case_name in tool_cases:
         payload["tools"] = TOOL_SCHEMA
         payload["tool_choice"] = "auto"
 
@@ -162,6 +174,8 @@ def make_payload(
         add_grammar(payload, ANSWER_GRAMMAR, server)
     elif case_name == "tools_plus_tool_xml_grammar":
         add_grammar(payload, TOOL_CALL_XML_GRAMMAR, server)
+    elif case_name == "tools_plus_hermes_json_grammar":
+        add_grammar(payload, TOOL_CALL_HERMES_JSON_GRAMMAR, server)
 
     return payload
 
@@ -185,6 +199,7 @@ def main() -> int:
         "grammar_only",
         "tools_plus_answer_grammar",
         "tools_plus_tool_xml_grammar",
+        "tools_plus_hermes_json_grammar",
     ])
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -204,6 +219,7 @@ def main() -> int:
         "grammar_only",
         "tools_plus_answer_grammar",
         "tools_plus_tool_xml_grammar",
+        "tools_plus_hermes_json_grammar",
     ]
 
     chat_url = base_url + "/chat/completions"
