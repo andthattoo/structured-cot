@@ -222,7 +222,13 @@ def build_report(root: Path, report_dir: Path, rows: list[dict], task_rows: list
     lines.append("# vLLM Structured-CoT Matrix Findings\n")
     lines.append("## Scope\n")
     lines.append("This report summarizes the vLLM-only matrix artifacts under `" + str(root) + "`.\n")
-    lines.append("The server configuration keeps vLLM defaults, no quantization, and no runtime tuning beyond tensor parallelism needed to serve the model.\n")
+    lines.append(
+        "Runtime configuration is not swept as an experimental factor: there is no quantization, no alternate serving stack, "
+        "and no reasoning parser. Serving uses fixed vLLM settings for the run: Qwen3.6-35B-A3B was served TP=4, "
+        "and the 8B models were served as DP=4/TP=1 replicas with `max_model_len=32768`, "
+        "`max_num_seqs=128`, and `max_num_batched_tokens=65536`."
+    )
+    lines.append("")
     if skipped:
         lines.append("## Skipped Cells\n")
         for s in skipped:
