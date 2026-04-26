@@ -11,6 +11,7 @@
 #   BUILD_JOBS=8 ./scripts/install_llama_cpp_cuda.sh
 #   CUDA_TOOLKIT_PACKAGE=cuda-toolkit-12-4 ./scripts/install_llama_cpp_cuda.sh
 #   INSTALL_CUDA_TOOLKIT=0 ./scripts/install_llama_cpp_cuda.sh
+#   CLEAN_BUILD=1 ./scripts/install_llama_cpp_cuda.sh
 
 set -euo pipefail
 
@@ -19,6 +20,7 @@ BUILD_DIR="${BUILD_DIR:-${LLAMA_CPP_DIR}/build}"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
 CUDA_TOOLKIT_PACKAGE="${CUDA_TOOLKIT_PACKAGE:-cuda-toolkit-12-4}"
 INSTALL_CUDA_TOOLKIT="${INSTALL_CUDA_TOOLKIT:-1}"
+CLEAN_BUILD="${CLEAN_BUILD:-0}"
 
 if ! command -v sudo >/dev/null 2>&1; then
     echo "ERROR: sudo not found. Install dependencies manually, then rerun:"
@@ -29,7 +31,7 @@ fi
 
 echo "Installing llama.cpp build dependencies"
 sudo apt-get update
-sudo apt-get install -y git cmake build-essential libcurl4-openssl-dev ca-certificates wget
+sudo apt-get install -y git cmake build-essential gcc g++ libcurl4-openssl-dev ca-certificates wget
 
 if ! command -v nvcc >/dev/null 2>&1 && [ "${INSTALL_CUDA_TOOLKIT}" = "1" ]; then
     echo "nvcc not found; installing CUDA toolkit from NVIDIA apt repository"
@@ -91,6 +93,15 @@ fi
 echo "Using nvcc: $(command -v nvcc)"
 nvcc --version | tail -n 1
 
+if ! command -v g++ >/dev/null 2>&1; then
+    echo "ERROR: g++ not found. nvcc needs a host C++ compiler."
+    echo "Try: sudo apt-get install -y g++"
+    exit 1
+fi
+
+echo "Using g++: $(command -v g++)"
+g++ --version | head -n 1
+
 if [ -d "${LLAMA_CPP_DIR}/.git" ]; then
     echo "Updating existing llama.cpp checkout: ${LLAMA_CPP_DIR}"
     git -C "${LLAMA_CPP_DIR}" pull --ff-only
@@ -104,9 +115,18 @@ else
     git clone https://github.com/ggml-org/llama.cpp "${LLAMA_CPP_DIR}"
 fi
 
+if [ "${CLEAN_BUILD}" = "1" ]; then
+    echo "Cleaning build directory: ${BUILD_DIR}"
+    rm -rf "${BUILD_DIR}"
+elif [ -f "${BUILD_DIR}/CMakeCache.txt" ]; then
+    echo "Removing stale CMake cache from previous configure attempt"
+    rm -f "${BUILD_DIR}/CMakeCache.txt"
+fi
+
 echo "Configuring CUDA build"
 cmake -S "${LLAMA_CPP_DIR}" -B "${BUILD_DIR}" \
     -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_HOST_COMPILER="$(command -v g++)" \
     -DCMAKE_BUILD_TYPE=Release
 
 echo "Building llama.cpp with ${BUILD_JOBS} jobs"
