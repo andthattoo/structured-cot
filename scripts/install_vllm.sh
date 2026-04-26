@@ -36,7 +36,7 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ -d "${VLLM_VENV}" ] && [ ! -x "${VLLM_VENV}/bin/python" ]; then
+if [ -d "${VLLM_VENV}" ] && { [ ! -x "${VLLM_VENV}/bin/python" ] || [ ! -r "${VLLM_VENV}/bin/activate" ]; }; then
     echo "Removing incomplete virtualenv: ${VLLM_VENV}"
     rm -rf "${VLLM_VENV}"
 fi
@@ -44,6 +44,14 @@ fi
 if [ ! -d "${VLLM_VENV}" ]; then
     echo "Creating uv virtualenv: ${VLLM_VENV}"
     uv venv --python "${PYTHON_BIN}" "${VLLM_VENV}"
+fi
+
+if [ ! -r "${VLLM_VENV}/bin/activate" ]; then
+    echo "ERROR: virtualenv activation script not found: ${VLLM_VENV}/bin/activate"
+    echo "Try recreating the env manually:"
+    echo "  rm -rf \"${VLLM_VENV}\""
+    echo "  uv venv --python \"${PYTHON_BIN}\" \"${VLLM_VENV}\""
+    exit 1
 fi
 
 # shellcheck disable=SC1091
