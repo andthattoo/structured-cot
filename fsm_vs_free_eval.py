@@ -698,8 +698,16 @@ def generate_fsm(
     grammar: str,
     max_tokens: int,
     system_prompt: str,
+    grammar_api: str,
 ) -> tuple[str, int]:
     """Chat completion with GBNF grammar applied to the whole assistant response."""
+    if grammar_api == "llama_cpp":
+        extra_body = {"grammar": grammar}
+    elif grammar_api == "vllm":
+        extra_body = {"structured_outputs": {"grammar": grammar}}
+    else:
+        raise ValueError(f"unknown grammar_api {grammar_api}")
+
     r = client.chat.completions.create(
         model=model,
         messages=[
@@ -708,7 +716,7 @@ def generate_fsm(
         ],
         max_tokens=max_tokens,
         temperature=0.0,
-        extra_body={"grammar": grammar},
+        extra_body=extra_body,
     )
     text = message_text(r.choices[0].message)
     completion_tokens = r.usage.completion_tokens if r.usage else count_tokens(text, model)
@@ -883,6 +891,8 @@ def main():
                    help="LCB platform filter: leetcode / atcoder / codeforces. "
                         "Empty string = no platform filter.")
     p.add_argument("--grammar-file", default="grammars/fsm_grammar.gbnf")
+    p.add_argument("--grammar-api", choices=["llama_cpp", "vllm"], default="llama_cpp",
+                   help="How to pass grammar constraints to the OpenAI-compatible server.")
     p.add_argument("--max-tokens", type=int, default=8192)
     p.add_argument("--timeout", type=int, default=30,
                    help="Per-test execution timeout (seconds).")
@@ -927,7 +937,7 @@ def main():
         user_prompt = build_user_prompt(prob, args.dataset)
         entry_point = prob.get("entry_point") or "candidate"
         test_code = prob.get("test", "")
-        task_id = prob["task_id"]
+        task_id = str(prob["task_id"])
 
         def _score(code: str) -> tuple[bool, str]:
             if args.dataset == "livecodebench":
@@ -950,6 +960,7 @@ def main():
                     grammar,
                     args.max_tokens,
                     fsm_system_prompt,
+                    args.grammar_api,
                 )
             if mode == "prompt_terse":
                 return generate_prompt_terse(client, args.model, user_prompt, args.max_tokens)
