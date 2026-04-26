@@ -12,6 +12,7 @@
 # Customization:
 #   MODEL=Qwen/Qwen2.5-14B-Instruct ./run_vllm_server.sh
 #   TOOL_CALL_PARSER=hermes ./run_vllm_server.sh
+#   MODEL=Qwen/Qwen3.6-27B-FP8 REASONING_PARSER=qwen3 TOOL_CALL_PARSER=qwen3_coder ./run_vllm_server.sh
 #   PORT=8001 BACKGROUND=1 ./run_vllm_server.sh
 
 set -euo pipefail
@@ -22,8 +23,10 @@ PORT="${PORT:-8001}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-hermes}"
+REASONING_PARSER="${REASONING_PARSER:-}"
 ENABLE_AUTO_TOOL_CHOICE="${ENABLE_AUTO_TOOL_CHOICE:-1}"
 STRUCTURED_OUTPUTS_BACKEND="${STRUCTURED_OUTPUTS_BACKEND:-auto}"
+LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
 BACKGROUND="${BACKGROUND:-0}"
 LOG_FILE="${LOG_FILE:-vllm_server.log}"
 PID_FILE="${PID_FILE:-vllm_server.pid}"
@@ -49,12 +52,22 @@ if [ "${ENABLE_AUTO_TOOL_CHOICE}" = "1" ]; then
     ARGS+=(--enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER}")
 fi
 
+if [ -n "${REASONING_PARSER}" ]; then
+    ARGS+=(--reasoning-parser "${REASONING_PARSER}")
+fi
+
+if [ "${LANGUAGE_MODEL_ONLY}" = "1" ]; then
+    ARGS+=(--language-model-only)
+fi
+
 echo "Starting vLLM OpenAI server"
 echo "  model       = ${MODEL}"
 echo "  host:port   = ${HOST}:${PORT}"
 echo "  max_len     = ${MAX_MODEL_LEN}"
 echo "  gpu_mem     = ${GPU_MEMORY_UTILIZATION}"
 echo "  tool_parser = ${ENABLE_AUTO_TOOL_CHOICE:+${TOOL_CALL_PARSER}}"
+echo "  reasoning   = ${REASONING_PARSER:-none}"
+echo "  text_only   = ${LANGUAGE_MODEL_ONLY}"
 echo "  structured  = ${STRUCTURED_OUTPUTS_BACKEND}"
 echo
 
