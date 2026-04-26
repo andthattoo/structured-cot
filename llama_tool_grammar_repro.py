@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Minimal llama.cpp tool-calling + GBNF grammar repro matrix.
+"""Minimal tool-calling + grammar repro matrix.
 
 This intentionally avoids the OpenAI Python SDK so it can run on a fresh GPU
-box with only Python available. It targets llama-server's OpenAI-compatible
-chat completions endpoint.
+box with only Python available. It targets OpenAI-compatible chat completions
+endpoints such as llama.cpp's llama-server and vLLM's OpenAI server.
 """
 
 from __future__ import annotations
@@ -115,7 +115,28 @@ def classify(case_name: str, response: dict[str, Any]) -> str:
     return "ok"
 
 
-def make_payload(case_name: str, model: str, max_tokens: int, temperature: float) -> dict[str, Any]:
+def add_grammar(payload: dict[str, Any], grammar: str, server: str) -> None:
+    if server == "llama_cpp":
+        payload["grammar"] = grammar
+    elif server == "vllm":
+        payload["structured_outputs"] = {"grammar": grammar}
+    elif server == "vllm_legacy":
+        payload["guided_grammar"] = grammar
+    else:
+        raise ValueError(f"unknown server kind: {server}")
+
+
+def has_grammar(payload: dict[str, Any]) -> bool:
+    return any(key in payload for key in ("grammar", "structured_outputs", "guided_grammar"))
+
+
+def make_payload(
+    case_name: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    server: str,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
@@ -136,11 +157,11 @@ def make_payload(case_name: str, model: str, max_tokens: int, temperature: float
         payload["tool_choice"] = "auto"
 
     if case_name == "grammar_only":
-        payload["grammar"] = ANSWER_GRAMMAR
+        add_grammar(payload, ANSWER_GRAMMAR, server)
     elif case_name == "tools_plus_answer_grammar":
-        payload["grammar"] = ANSWER_GRAMMAR
+        add_grammar(payload, ANSWER_GRAMMAR, server)
     elif case_name == "tools_plus_tool_xml_grammar":
-        payload["grammar"] = TOOL_CALL_XML_GRAMMAR
+        add_grammar(payload, TOOL_CALL_XML_GRAMMAR, server)
 
     return payload
 
@@ -149,6 +170,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--server",
+        choices=["llama_cpp", "vllm", "vllm_legacy"],
+        default="llama_cpp",
+        help=(
+            "Grammar request shape to use. llama_cpp sends top-level 'grammar'; "
+            "vllm sends top-level 'structured_outputs'; vllm_legacy sends "
+            "top-level 'guided_grammar'."
+        ),
+    )
     parser.add_argument("--case", action="append", choices=[
         "tools_only",
         "grammar_only",
@@ -183,9 +214,9 @@ def main() -> int:
             if i > 1 and args.sleep > 0:
                 time.sleep(args.sleep)
 
-            payload = make_payload(case_name, model, args.max_tokens, args.temperature)
+            payload = make_payload(case_name, model, args.max_tokens, args.temperature, args.server)
             print(f"\n=== {case_name} ===", flush=True)
-            print(f"request: tools={'tools' in payload} grammar={'grammar' in payload}", flush=True)
+            print(f"request: tools={'tools' in payload} grammar={has_grammar(payload)}", flush=True)
 
             record: dict[str, Any] = {
                 "case": case_name,

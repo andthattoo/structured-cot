@@ -169,18 +169,6 @@ Each run produces in `fsm_vs_free/`:
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting
 - `per_problem.md` — human-readable report with outcome tags (🔺 / 🔻 / 🟰 / ❌)
 
-To make a side-by-side generation animation for one problem:
-
-```bash
-uv run python make_tps_animation.py \
-    --task-id 3781 \
-    --left-results lcb_v6_2025_01_01_free_n50/results.jsonl \
-    --left-mode free --left-label FREE --left-seconds 237 \
-    --right-results lcb_v6_2025_01_01_fsm_lcb_plan_n50/results.jsonl \
-    --right-mode fsm --right-label FSM_PLAN --right-seconds 279 \
-    --out animations/lcb_3781_free_vs_fsm_plan.html
-```
-
 The summary also reports `post_think_tokens_mean`, `answer_channel_bloat`,
 `code_comment_tokens_mean`, and `comment_bloat`. Those are useful on
 LiveCodeBench because a model can obey a short `<think>` grammar while moving
