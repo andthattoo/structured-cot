@@ -234,6 +234,14 @@ def build_report(root: Path, report_dir: Path, rows: list[dict], task_rows: list
         for s in skipped:
             lines.append(f"- `{s.get('path')}`: {s.get('reason')} (count={s.get('count')})")
         lines.append("")
+    lines.append("## Interpretation Guardrails\n")
+    lines.append("- Treat this as a vLLM replication/generalization study, not a bit-for-bit reproduction of the original llama.cpp/GGUF run.")
+    lines.append("- The headline reproduction claim should be scoped to Qwen3.6-35B-A3B under vLLM: large explicit-think compression is reproduced, while HumanEval pass-rate parity is not exactly reproduced in this run.")
+    lines.append("- LiveCodeBench results are public functional-test results from `livecodebench/code_generation_lite`, not official hidden-test leaderboard scores.")
+    lines.append("- MBPP rows are diagnostic only: the current MBPP harness frequently falls back to `candidate` while tests expect task-specific entry points, so MBPP pass rates should not be used as model-capability claims.")
+    lines.append("- DeepSeek-R1-Distill-Llama-8B rows are diagnostic generalization evidence only unless separately fixed: completed cells show output-format/harness mismatch, and constrained cells emitted repeated vLLM/xgrammar FSM-advance warnings in the server log.")
+    lines.append("- Pooled averages below mix headline and exploratory cells; use per-model/per-benchmark rows for claims.")
+    lines.append("")
     lines.append("## Charts\n")
     for c in charts:
         lines.append(f"![{c}]({c})")
@@ -263,27 +271,27 @@ def build_report(root: Path, report_dir: Path, rows: list[dict], task_rows: list
             f"{fmt(mean([x['total_compression'] for x in xs]), 2)}x |"
         )
     lines.append("")
-    lines.append("## Claim Checks\n")
+    lines.append("## Descriptive Claim Checks\n")
     fsm_pairs = [p for p in pair_rows if p["mode"].startswith("fsm_")]
     prompt_pairs = [p for p in pair_rows if p["mode"] == "prompt_terse"]
     if fsm_pairs:
         lines.append(
-            "- FSM-constrained cells completed so far: "
+            "- Pooled FSM-constrained repeat-pairs completed so far (descriptive only, not a headline claim): "
             f"{len(fsm_pairs)} repeat-pairs; mean think compression "
             f"{fmt(mean([p['think_compression'] for p in fsm_pairs]), 2)}x; "
             f"mean pass delta {fmt(mean([p['pass_delta_pp'] for p in fsm_pairs]))} pp."
         )
     if prompt_pairs:
         lines.append(
-            "- Prompt-only terse control cells completed so far: "
+            "- Pooled prompt-only terse repeat-pairs completed so far (descriptive only, not a headline claim): "
             f"{len(prompt_pairs)} repeat-pairs; mean think compression "
             f"{fmt(mean([p['think_compression'] for p in prompt_pairs]), 2)}x; "
             f"mean pass delta {fmt(mean([p['pass_delta_pp'] for p in prompt_pairs]))} pp."
         )
     models_done = sorted({r["model_alias"] for r in completed})
     benches_done = sorted({r["benchmark"] for r in completed})
-    lines.append(f"- Completed model coverage in this report: {', '.join(models_done) if models_done else '-'}")
-    lines.append(f"- Completed benchmark coverage in this report: {', '.join(benches_done) if benches_done else '-'}")
+    lines.append(f"- Models with at least one completed cell in this report: {', '.join(models_done) if models_done else '-'}")
+    lines.append(f"- Benchmarks with at least one completed cell in this report: {', '.join(benches_done) if benches_done else '-'}")
     lines.append("")
     lines.append("## Failure Accounting\n")
     fail_counts = defaultdict(int)
