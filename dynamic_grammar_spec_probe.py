@@ -165,7 +165,9 @@ Rules:
         "temperature": temperature,
         "max_tokens": max_tokens,
         "grammar": META_GRAMMAR,
+        "reasoning": {"effort": "none"},
         "reasoning_budget": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     return post_json(base_url.rstrip("/") + "/chat/completions", payload, timeout)
 
