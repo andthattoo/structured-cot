@@ -22,7 +22,8 @@ from terminal_bench.terminal.tmux_session import TmuxSession
 
 
 REASONING_INNER_GRAMMAR = r'''
-root ::= "GOAL: " line "TOOL: " line "ARGS: " line
+root ::= "GOAL: " line "TOOL: " tool "\n" "WHY: " line
+tool ::= "run_shell" | "finish"
 line ::= [^\n]+ "\n"
 '''
 
