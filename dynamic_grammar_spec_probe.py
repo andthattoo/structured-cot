@@ -2,7 +2,7 @@
 """Probe grammar-in-grammar via a constrained next-grammar spec.
 
 Step 1 is constrained by a meta-grammar. The model emits:
-  GOAL / STATE / EDGE / NEXT_GRAMMAR / ALLOWED_CITY
+  NEXT_GRAMMAR / ALLOWED_CITY / EDGE / GOAL / STATE
 
 Step 2 compiles that safe spec into real GBNF and sends it with tools enabled
 to patched llama.cpp. This tests dynamic next-step grammar selection without
@@ -20,7 +20,7 @@ from typing import Any
 
 
 META_GRAMMAR = r'''
-root ::= "GOAL: " line "STATE: " line "EDGE: " line "NEXT_GRAMMAR: " grammar_id "\n" "ALLOWED_CITY: " city "\n"
+root ::= "NEXT_GRAMMAR: " grammar_id "\n" "ALLOWED_CITY: " city "\n" "EDGE: " line "GOAL: " line "STATE: " line
 line ::= [^\n]+ "\n"
 grammar_id ::= "tool_plan" | "tool_plan_city"
 city ::= "Paris" | "London" | "Tokyo"
@@ -157,6 +157,8 @@ Rules:
 - NEXT_GRAMMAR should be tool_plan_city when the city is clear.
 - ALLOWED_CITY should be the city from the task.
 - EDGE should mention the main risk in one short sentence.
+- GOAL should say what the next reasoning step should accomplish.
+- STATE should summarize known task state in one short sentence.
 """
 
     payload = {
