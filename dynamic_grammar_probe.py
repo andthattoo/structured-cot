@@ -85,6 +85,14 @@ def collect_text(message: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def choice_finish_reason(response: dict[str, Any]) -> str | None:
+    choices = response.get("choices") or []
+    if not choices:
+        return None
+    value = choices[0].get("finish_reason")
+    return value if isinstance(value, str) else None
+
+
 def extract_json_object(text: str) -> dict[str, Any]:
     text = text.strip()
     if text.startswith("```"):
@@ -107,6 +115,19 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return parsed
 
 
+def validate_generated_grammar(data: dict[str, Any]) -> str:
+    grammar = data.get("grammar")
+    if not isinstance(grammar, str) or "root ::=" not in grammar:
+        raise ValueError(f"generated JSON does not contain a GBNF grammar: {data}")
+    if "..." in grammar:
+        raise ValueError(f"generated grammar still contains a placeholder: {grammar!r}")
+    if "<think>" in grammar or "</think>" in grammar:
+        raise ValueError(f"generated grammar must not include think tags: {grammar!r}")
+    if "<tool_call>" in grammar or "tool_call" in grammar:
+        raise ValueError(f"generated grammar must not include tool-call syntax: {grammar!r}")
+    return grammar
+
+
 def tool_calls(response: dict[str, Any]) -> list[Any]:
     message = first_choice_message(response)
     calls = message.get("tool_calls")
@@ -120,10 +141,11 @@ def generate_grammar(
     timeout: int,
     max_tokens: int,
     temperature: float,
+    grammar_reasoning_budget: int | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    prompt = f"""You generate small llama.cpp GBNF grammars.
+    prompt = f"""Generate one small llama.cpp GBNF grammar.
 
-Generate a grammar for the NEXT assistant reasoning step only.
+The grammar is for the NEXT assistant reasoning step only.
 Important constraints:
 - The grammar is applied to message.reasoning_content only.
 - Do not include <think> or </think> tags.
@@ -132,12 +154,13 @@ Important constraints:
 - It must end in a terminal state after the final newline.
 - Use llama.cpp GBNF syntax.
 - Use only simple rules like: line ::= [^\\n]+ "\\n"
+- Do not explain. Do not include markdown.
 
 Next task:
 {task}
 
-Return only JSON with this shape:
-{{"name":"short_name","grammar":"root ::= ..."}}
+Return only compact JSON:
+{{"name":"tool_plan","grammar":"root ::= \\"GOAL: \\" line \\"TOOL: \\" line \\"ARGS: \\" line\\nline ::= [^\\\\n]+ \\"\\\\n\\""}}
 """
 
     payload = {
@@ -145,13 +168,24 @@ Return only JSON with this shape:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
     }
+    if grammar_reasoning_budget is not None:
+        payload["reasoning_budget"] = grammar_reasoning_budget
+
     response = post_json(base_url.rstrip("/") + "/chat/completions", payload, timeout)
+    finish_reason = choice_finish_reason(response)
+    if finish_reason == "length":
+        raise ValueError("grammar-generation call hit max_tokens before producing content")
+
     message = first_choice_message(response)
-    data = extract_json_object(collect_text(message))
-    grammar = data.get("grammar")
-    if not isinstance(grammar, str) or "root ::=" not in grammar:
-        raise ValueError(f"generated JSON does not contain a GBNF grammar: {data}")
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        text = collect_text(message)
+        raise ValueError(f"grammar-generation call produced no assistant content; got:\n{text}")
+
+    data = extract_json_object(content)
+    validate_generated_grammar(data)
     return data, response
 
 
@@ -184,6 +218,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--grammar-max-tokens", type=int, default=512)
     parser.add_argument("--run-max-tokens", type=int, default=1024)
+    parser.add_argument(
+        "--grammar-reasoning-budget",
+        type=int,
+        default=0,
+        help="Reasoning budget for the grammar-generation call; use -1 to omit.",
+    )
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--json", help="Optional path to write the full probe record.")
     args = parser.parse_args()
@@ -211,8 +251,11 @@ def main() -> int:
             timeout=args.timeout,
             max_tokens=args.grammar_max_tokens,
             temperature=args.temperature,
+            grammar_reasoning_budget=None
+            if args.grammar_reasoning_budget < 0
+            else args.grammar_reasoning_budget,
         )
-        grammar = generated["grammar"]
+        grammar = validate_generated_grammar(generated)
         record["generated"] = generated
         record["grammar_response"] = grammar_response
 
