@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-DATASET="${DATASET:-terminal-bench-core==head}"
+DATASET="${DATASET:-terminal-bench-core==0.1.1}"
 TASK_ID="${TASK_ID:-hello-world}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
 MODEL="${MODEL:-ggml-org/Qwen3.6-27B-GGUF}"

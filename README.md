@@ -192,7 +192,7 @@ GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
 GRAMMAR_MODE=reasoning ./scripts/run_terminal_bench_smoke.sh
 ```
 
-The script defaults to `terminal-bench-core==head` and `hello-world`. Override
+The script defaults to `terminal-bench-core==0.1.1` and `hello-world`. Override
 with `TASK_ID=...`, `DATASET=...`, `MODEL=...`, or `BASE_URL=...`.
 
 Each run produces in `fsm_vs_free/`:
