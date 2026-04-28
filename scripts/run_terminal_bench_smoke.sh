@@ -11,6 +11,9 @@
 #
 # Run the full dataset by omitting --task-id:
 #   TASK_ID=all GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
+#
+# Full runs default to serial execution because one llama-server usually cannot
+# handle Terminal-Bench's default 4 concurrent trials.
 
 set -euo pipefail
 
@@ -22,6 +25,8 @@ GRAMMAR_MODE="${GRAMMAR_MODE:-none}"
 MAX_TURNS="${MAX_TURNS:-40}"
 MAX_TOKENS="${MAX_TOKENS:-1024}"
 COMMAND_TIMEOUT_SEC="${COMMAND_TIMEOUT_SEC:-180}"
+N_CONCURRENT="${N_CONCURRENT:-1}"
+N_TASKS="${N_TASKS:-}"
 TB_BIN="${TB_BIN:-tb}"
 INSTALL_TB="${INSTALL_TB:-0}"
 
@@ -58,15 +63,23 @@ echo "  base_url     = ${BASE_URL}"
 echo "  model        = ${MODEL}"
 echo "  grammar_mode = ${GRAMMAR_MODE}"
 echo "  max_turns    = ${MAX_TURNS}"
+echo "  n_concurrent = ${N_CONCURRENT}"
+if [ -n "${N_TASKS}" ]; then
+    echo "  n_tasks      = ${N_TASKS}"
+fi
 echo
 
 TASK_ARGS=()
 if [ -n "${TASK_ID}" ] && [ "${TASK_ID}" != "all" ] && [ "${TASK_ID}" != "*" ]; then
     TASK_ARGS=(--task-id "${TASK_ID}")
 fi
+if [ -n "${N_TASKS}" ]; then
+    TASK_ARGS+=(--n-tasks "${N_TASKS}")
+fi
 
 PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}" "${TB_BIN}" run \
     --dataset "${DATASET}" \
+    --n-concurrent "${N_CONCURRENT}" \
     --agent-import-path terminal_bench_structured_cot_agent:StructuredCotTerminalAgent \
     "${TASK_ARGS[@]}" \
     --agent-kwarg "base_url=${BASE_URL}" \

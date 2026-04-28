@@ -201,6 +201,14 @@ with `TASK_ID=...`, `DATASET=...`, `MODEL=...`, or `BASE_URL=...`. Use
 TASK_ID=all GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
 ```
 
+The runner defaults to `N_CONCURRENT=1` because Terminal-Bench defaults to
+four concurrent trials, which can overwhelm a single local `llama-server`.
+For a smaller serial slice:
+
+```bash
+TASK_ID=all N_TASKS=10 GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
+```
+
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting
