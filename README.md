@@ -189,7 +189,8 @@ Then compare the same task with and without reasoning grammar:
 
 ```bash
 GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
-GRAMMAR_MODE=reasoning ./scripts/run_terminal_bench_smoke.sh
+GRAMMAR_MODE=reasoning ./scripts/run_terminal_bench_smoke.sh  # STEP only
+GRAMMAR_MODE=phase ./scripts/run_terminal_bench_smoke.sh      # PHASE/CHECK/NEXT
 ```
 
 The script defaults to `terminal-bench-core==0.1.1` and `hello-world`. Override

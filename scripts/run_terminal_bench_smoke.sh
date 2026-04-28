@@ -4,9 +4,10 @@
 # Defaults assume a patched native llama-server is already running on port 8000:
 #   REASONING_FORMAT=deepseek BACKGROUND=1 ./run_llama_server.sh
 #
-# Compare free vs reasoning-grammar mode:
+# Compare free vs reasoning-grammar modes:
 #   GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
-#   GRAMMAR_MODE=reasoning ./scripts/run_terminal_bench_smoke.sh
+#   GRAMMAR_MODE=reasoning ./scripts/run_terminal_bench_smoke.sh  # STEP only
+#   GRAMMAR_MODE=phase ./scripts/run_terminal_bench_smoke.sh      # PHASE/CHECK/NEXT
 
 set -euo pipefail
 

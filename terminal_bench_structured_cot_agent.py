@@ -2,9 +2,9 @@
 """Terminal-Bench agent for local structured-CoT experiments.
 
 The agent talks to an OpenAI-compatible chat endpoint and exposes the tmux
-terminal as two tools: run_shell and finish. With patched llama.cpp,
-grammar_mode=reasoning applies a small GBNF grammar only to reasoning_content,
-then lets llama.cpp's normal lazy tool grammar parse shell tool calls.
+terminal as two tools: run_shell and finish. With patched llama.cpp, the
+grammar modes apply small GBNF grammars only to reasoning_content, then let
+llama.cpp's normal lazy tool grammar parse shell tool calls.
 """
 
 from __future__ import annotations
@@ -24,6 +24,14 @@ from terminal_bench.terminal.tmux_session import TmuxSession
 REASONING_INNER_GRAMMAR = r'''
 root ::= "STEP: " step "\n"
 step ::= "inspect" | "edit" | "test" | "verify" | "finish"
+'''
+
+
+PHASE_GRAMMAR = r'''
+root ::= "PHASE: " phase "\n" "CHECK: " check "\n" "NEXT: " next "\n"
+phase ::= "inspect" | "plan" | "edit" | "test" | "debug" | "verify" | "finish"
+check ::= "unknown" | "file_state" | "test_failure" | "command_output" | "requirements" | "done"
+next ::= "inspect" | "edit" | "run_tests" | "debug" | "verify" | "finish"
 '''
 
 
@@ -139,9 +147,11 @@ class StructuredCotTerminalAgent(BaseAgent):
         }
         if self.grammar_mode == "reasoning":
             payload["grammar"] = REASONING_INNER_GRAMMAR
+        elif self.grammar_mode == "phase":
+            payload["grammar"] = PHASE_GRAMMAR
         elif self.grammar_mode not in {"none", "free"}:
             raise ValueError(
-                "grammar_mode must be 'none', 'free', or 'reasoning', "
+                "grammar_mode must be 'none', 'free', 'reasoning', or 'phase', "
                 f"got {self.grammar_mode!r}"
             )
         return payload
