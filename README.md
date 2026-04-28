@@ -164,6 +164,37 @@ uv run python fsm_vs_free_eval.py --dataset livecodebench \
     --out-dir lcb_v6_2025_01_01_fsm_lcb_plan
 ```
 
+### Terminal-Bench smoke test
+
+Terminal-Bench is the first multi-turn agent probe in this repo. It uses a
+custom [`BaseAgent`](terminal_bench_structured_cot_agent.py) that talks to an
+OpenAI-compatible local endpoint and exposes the terminal as `run_shell` /
+`finish` tools. This is meant for the patched llama.cpp reasoning-grammar path,
+where the user grammar applies to `message.reasoning_content` and llama.cpp's
+normal tool-call grammar still handles tool calls.
+
+Terminal-Bench requires Docker and its CLI:
+
+```bash
+uv tool install terminal-bench
+```
+
+Start patched native llama.cpp with reasoning extraction:
+
+```bash
+REASONING_FORMAT=deepseek BACKGROUND=1 ./run_llama_server.sh
+```
+
+Then compare the same task with and without reasoning grammar:
+
+```bash
+GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
+GRAMMAR_MODE=reasoning ./scripts/run_terminal_bench_smoke.sh
+```
+
+The script defaults to `terminal-bench-core==head` and `hello-world`. Override
+with `TASK_ID=...`, `DATASET=...`, `MODEL=...`, or `BASE_URL=...`.
+
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting
