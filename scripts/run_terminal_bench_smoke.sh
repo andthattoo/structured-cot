@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one Terminal-Bench task with the local structured-cot agent.
+# Run Terminal-Bench with the local structured-cot agent.
 #
 # Defaults assume a patched native llama-server is already running on port 8000:
 #   REASONING_FORMAT=deepseek BACKGROUND=1 ./run_llama_server.sh
@@ -8,6 +8,9 @@
 #   GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
 #   GRAMMAR_MODE=reasoning ./scripts/run_terminal_bench_smoke.sh  # STEP only
 #   GRAMMAR_MODE=phase ./scripts/run_terminal_bench_smoke.sh      # PHASE/CHECK/NEXT
+#
+# Run the full dataset by omitting --task-id:
+#   TASK_ID=all GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
 
 set -euo pipefail
 
@@ -57,10 +60,15 @@ echo "  grammar_mode = ${GRAMMAR_MODE}"
 echo "  max_turns    = ${MAX_TURNS}"
 echo
 
+TASK_ARGS=()
+if [ -n "${TASK_ID}" ] && [ "${TASK_ID}" != "all" ] && [ "${TASK_ID}" != "*" ]; then
+    TASK_ARGS=(--task-id "${TASK_ID}")
+fi
+
 PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}" "${TB_BIN}" run \
     --dataset "${DATASET}" \
     --agent-import-path terminal_bench_structured_cot_agent:StructuredCotTerminalAgent \
-    --task-id "${TASK_ID}" \
+    "${TASK_ARGS[@]}" \
     --agent-kwarg "base_url=${BASE_URL}" \
     --agent-kwarg "model=${MODEL}" \
     --agent-kwarg "grammar_mode=${GRAMMAR_MODE}" \

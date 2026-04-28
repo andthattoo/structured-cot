@@ -194,7 +194,12 @@ GRAMMAR_MODE=phase ./scripts/run_terminal_bench_smoke.sh      # PHASE/CHECK/NEXT
 ```
 
 The script defaults to `terminal-bench-core==0.1.1` and `hello-world`. Override
-with `TASK_ID=...`, `DATASET=...`, `MODEL=...`, or `BASE_URL=...`.
+with `TASK_ID=...`, `DATASET=...`, `MODEL=...`, or `BASE_URL=...`. Use
+`TASK_ID=all` to omit `--task-id` and run the full dataset:
+
+```bash
+TASK_ID=all GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
+```
 
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata
