@@ -125,6 +125,28 @@ class StructuredCotTerminalAgent(BaseAgent):
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
+    def _system_prompt(self) -> str:
+        prompt = (
+            "You are solving a Terminal-Bench task in a Linux shell. "
+            "Use run_shell to inspect files, edit files, run tests, and "
+            "verify your work. Use one non-interactive shell command per "
+            "tool call. Use finish only after the task is complete."
+        )
+        if self.grammar_mode == "dsl":
+            prompt += (
+                " Your reasoning is constrained to a compact PLAN/STATE/RISK/NEXT "
+                "DSL. Treat the DSL as a decision record for the next tool call, "
+                "not as decorative filler. Use active states and NEXT: run_shell "
+                "while more evidence, edits, tests, or verification are needed. "
+                "Use RISK: premature_finish when completion has not been verified. "
+                "Use RISK: repeat_loop when you are about to repeat a prior check; "
+                "then choose a different useful command or finish if the prior "
+                "check already proved success. Use STATE: ready, RISK: none, and "
+                "NEXT: finish only after command output or tests confirm the "
+                "requested task is complete."
+            )
+        return prompt
+
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         req = urllib.request.Request(
             self.base_url + path,
@@ -256,12 +278,7 @@ class StructuredCotTerminalAgent(BaseAgent):
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
-                "content": (
-                    "You are solving a Terminal-Bench task in a Linux shell. "
-                    "Use run_shell to inspect files, edit files, run tests, and "
-                    "verify your work. Use one non-interactive shell command per "
-                    "tool call. Use finish only after the task is complete."
-                ),
+                "content": self._system_prompt(),
             },
             {
                 "role": "user",
