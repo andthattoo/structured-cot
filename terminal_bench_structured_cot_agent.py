@@ -10,6 +10,7 @@ llama.cpp's normal lazy tool grammar parse shell tool calls.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -43,13 +44,28 @@ next ::= "inspect" | "edit" | "run_tests" | "debug" | "verify" | "finish"
 
 
 DSL_GRAMMAR = r'''
-root ::= active_trace | finish_trace
-active_trace ::= "PLAN: " plan "\n" "STATE: " active_state "\n" "RISK: " active_risk "\n" "NEXT: run_shell\n"
-finish_trace ::= "PLAN: " plan "\n" "STATE: ready\n" "RISK: none\n" "NEXT: finish\n"
+root ::= "PLAN: " plan "\n" "STATE: " state "\n" "RISK: " risk "\n" "NEXT: " next "\n"
 plan ::= "seq(inspect,act,verify,finish)" | "seq(inspect,edit,verify,finish)" | "seq(inspect,test,debug,verify,finish)" | "fallback(verify,debug,finish)"
-active_state ::= "need_context" | "need_action" | "need_fix" | "need_verify" | "blocked"
-active_risk ::= "missing_context" | "bad_tool_args" | "wrong_target" | "test_failure" | "premature_finish" | "repeat_loop"
+state ::= "need_context" | "need_action" | "need_fix" | "need_verify" | "blocked" | "ready"
+risk ::= "none" | "missing_context" | "bad_tool_args" | "wrong_target" | "test_failure" | "premature_finish" | "repeat_loop"
+next ::= "run_shell" | "finish"
 '''
+
+
+DSL_REASONING_RE = re.compile(
+    r"\APLAN: "
+    r"(seq\(inspect,act,verify,finish\)|"
+    r"seq\(inspect,edit,verify,finish\)|"
+    r"seq\(inspect,test,debug,verify,finish\)|"
+    r"fallback\(verify,debug,finish\))\n"
+    r"STATE: "
+    r"(need_context|need_action|need_fix|need_verify|blocked|ready)\n"
+    r"RISK: "
+    r"(none|missing_context|bad_tool_args|wrong_target|test_failure|"
+    r"premature_finish|repeat_loop)\n"
+    r"NEXT: "
+    r"(run_shell|finish)\n?\Z"
+)
 
 
 RUN_SHELL_TOOL = {
@@ -228,6 +244,14 @@ class StructuredCotTerminalAgent(BaseAgent):
             "content": json.dumps(payload, ensure_ascii=False),
         }
 
+    def _reasoning_content(self, message: dict[str, Any]) -> str:
+        reasoning = message.get("reasoning_content")
+        if reasoning is None:
+            reasoning = message.get("reasoning")
+        if reasoning is None:
+            return ""
+        return str(reasoning)
+
     def _run_shell(
         self,
         session: TmuxSession,
@@ -332,6 +356,18 @@ class StructuredCotTerminalAgent(BaseAgent):
             message = choices[0].get("message") or {}
             tool_calls = message.get("tool_calls") or []
             content = message.get("content") or ""
+            if self.grammar_mode == "dsl":
+                reasoning = self._reasoning_content(message)
+                if not DSL_REASONING_RE.fullmatch(reasoning):
+                    self._write_jsonl(
+                        logging_dir,
+                        "grammar_violations.jsonl",
+                        {
+                            "turn": turn,
+                            "grammar_mode": self.grammar_mode,
+                            "reasoning_content": reasoning,
+                        },
+                    )
 
             if not tool_calls:
                 messages.append({"role": "assistant", "content": content})

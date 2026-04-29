@@ -206,9 +206,11 @@ NEXT: run_shell
 ```
 
 It is deliberately closer to behavior-tree / HTN control flow than natural
-language prose. The current version gates `finish`: active traces must choose
-`NEXT: run_shell` with a non-`none` risk, and `NEXT: finish` is only valid with
-`STATE: ready` / `RISK: none`. This is still a hand-written inference-time
+language prose. The current grammar keeps the shape flat because that has been
+more reliable with the pre-trigger grammar patch; the system prompt supplies
+the semantics for when `STATE: ready` / `RISK: none` / `NEXT: finish` should be
+used. DSL runs also write `grammar_violations.jsonl` if `reasoning_content`
+escapes the expected shape. This is still a hand-written inference-time
 grammar; the longer-term experiment is to mine these labels from successful
 agent traces, then train or dynamically select compact reasoning-state
 grammars per turn.
