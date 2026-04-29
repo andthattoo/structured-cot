@@ -231,6 +231,45 @@ For a smaller serial slice:
 TASK_ID=all N_TASKS=10 GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
 ```
 
+### Compact-DSL training data
+
+The inference-only grammars above are useful probes, but the stronger branch is
+to train the model to use a compact symbolic reasoning trace before tool calls.
+For a first pass, convert the filtered Hermes agent traces into SFT JSONL with
+verbose `<think>` blocks rewritten as a tiny existing-token DSL:
+
+```bash
+uv run python scripts/prepare_hermes_dsl_sft.py \
+    --dataset DJLougen/hermes-agent-traces-filtered \
+    --limit 200 \
+    --out hermes_dsl_sft_sample.jsonl
+```
+
+For the full filtered set:
+
+```bash
+uv run python scripts/prepare_hermes_dsl_sft.py \
+    --dataset DJLougen/hermes-agent-traces-filtered \
+    --out hermes_dsl_sft_full.jsonl
+```
+
+The output keeps the original tool calls and tool responses, but replaces
+assistant reasoning blocks with traces like:
+
+```text
+<think>
+PLAN: seq(observe,act,verify,finish)
+STATE: need_verify
+RISK: bad_tool_args
+NEXT: tool_call
+</think>
+```
+
+This treats the larger-model rollouts as noisy action demonstrations, not as
+ground-truth prose reasoning. The compact DSL is generated from the teacher
+trace and is meant for LoRA/SFT experiments where the model learns the symbolic
+state language before emitting normal tool calls.
+
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting
