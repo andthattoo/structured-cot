@@ -206,7 +206,9 @@ NEXT: run_shell
 ```
 
 It is deliberately closer to behavior-tree / HTN control flow than natural
-language prose. The current version is still a hand-written inference-time
+language prose. The current version gates `finish`: active traces must choose
+`NEXT: run_shell` with a non-`none` risk, and `NEXT: finish` is only valid with
+`STATE: ready` / `RISK: none`. This is still a hand-written inference-time
 grammar; the longer-term experiment is to mine these labels from successful
 agent traces, then train or dynamically select compact reasoning-state
 grammars per turn.

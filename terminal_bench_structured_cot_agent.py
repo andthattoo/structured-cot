@@ -43,11 +43,12 @@ next ::= "inspect" | "edit" | "run_tests" | "debug" | "verify" | "finish"
 
 
 DSL_GRAMMAR = r'''
-root ::= "PLAN: " plan "\n" "STATE: " state "\n" "RISK: " risk "\n" "NEXT: " next "\n"
-plan ::= "seq(inspect,act,verify,finish)" | "seq(inspect,edit,verify,finish)" | "seq(inspect,test,debug,verify,finish)" | "fallback(verify,debug,finish)" | "retry(inspect,act,verify)"
-state ::= "unknown" | "need_context" | "need_action" | "need_fix" | "need_verify" | "blocked" | "ready"
-risk ::= "none" | "missing_context" | "bad_tool_args" | "wrong_target" | "test_failure" | "premature_finish" | "repeat_loop"
-next ::= "run_shell" | "finish"
+root ::= active_trace | finish_trace
+active_trace ::= "PLAN: " plan "\n" "STATE: " active_state "\n" "RISK: " active_risk "\n" "NEXT: run_shell\n"
+finish_trace ::= "PLAN: " plan "\n" "STATE: ready\n" "RISK: none\n" "NEXT: finish\n"
+plan ::= "seq(inspect,act,verify,finish)" | "seq(inspect,edit,verify,finish)" | "seq(inspect,test,debug,verify,finish)" | "fallback(verify,debug,finish)"
+active_state ::= "need_context" | "need_action" | "need_fix" | "need_verify" | "blocked"
+active_risk ::= "missing_context" | "bad_tool_args" | "wrong_target" | "test_failure" | "premature_finish" | "repeat_loop"
 '''
 
 
