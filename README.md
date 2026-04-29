@@ -281,6 +281,33 @@ ground-truth prose reasoning. The compact DSL is meant for LoRA/SFT experiments
 where the model learns the symbolic state language before emitting normal tool
 calls.
 
+The default labels are heuristic. For cleaner labels, use a model-constrained
+relabeling pass. With a local OpenAI-compatible server that accepts `grammar`:
+
+```bash
+uv run python scripts/prepare_hermes_dsl_sft.py \
+    --dataset DJLougen/hermes-agent-traces-filtered \
+    --limit 200 \
+    --labeler local_grammar \
+    --labeler-base-url http://127.0.0.1:8000/v1 \
+    --labeler-model ggml-org/Qwen3.6-27B-GGUF \
+    --out hermes_dsl_sft_local_labeled.jsonl
+```
+
+With OpenRouter, set `OPENROUTER_API_KEY` and use a model that supports
+structured outputs. OpenRouter uses JSON Schema structured outputs here rather
+than GBNF:
+
+```bash
+export OPENROUTER_API_KEY=...
+uv run python scripts/prepare_hermes_dsl_sft.py \
+    --dataset DJLougen/hermes-agent-traces-filtered \
+    --limit 200 \
+    --labeler openrouter \
+    --labeler-model openai/gpt-4o-mini \
+    --out hermes_dsl_sft_openrouter_labeled.jsonl
+```
+
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting
