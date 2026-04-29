@@ -253,6 +253,75 @@ def has_tool_call(assistant_text: str) -> bool:
     return TOOL_CALL_RE.search(assistant_text) is not None
 
 
+def mark_source(
+    dsl: dict[str, str],
+    source: str,
+    *,
+    error: Exception | None = None,
+) -> dict[str, str]:
+    labeled = dict(dsl)
+    labeled["_source"] = source
+    if error is not None:
+        labeled["_labeler_error"] = repr(error)
+    return labeled
+
+
+def strip_tool_response_tags(text: str) -> list[str]:
+    matches = re.findall(
+        r"<tool_response>\s*(.*?)\s*</tool_response>",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if matches:
+        return matches
+    return [text] if text.strip() else []
+
+
+def parse_json_maybe(value: Any) -> Any:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                return value
+    return value
+
+
+def payload_failed(value: Any) -> bool:
+    value = parse_json_maybe(value)
+    if isinstance(value, list):
+        return any(payload_failed(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+
+    success = value.get("success")
+    if success is False:
+        return True
+
+    for key in ("exit_code", "returncode", "return_code"):
+        if key in value and value[key] not in (None, 0, "0"):
+            return True
+
+    status = str(value.get("status") or "").lower()
+    if status in {"error", "failed", "failure", "timeout"}:
+        return True
+
+    error = value.get("error")
+    if error not in (None, "", False):
+        return True
+
+    content = parse_json_maybe(value.get("content"))
+    if content is not value.get("content") or isinstance(content, (dict, list)):
+        return payload_failed(content)
+
+    return False
+
+
+def tool_response_failed(text: str) -> bool:
+    return any(payload_failed(block) for block in strip_tool_response_tags(text))
+
+
 def build_labeler_context(
     history: list[dict[str, str]],
     assistant_value: str,
@@ -332,28 +401,41 @@ class DslLabeler:
         context: str,
     ) -> dict[str, str]:
         if self.mode == "heuristic":
-            return infer_dsl(
-                think,
-                assistant_text,
-                prior_tool_text=prior_tool_text,
-            )
-        try:
-            if self.mode == "local_grammar":
-                return self._label_local_grammar(
-                    assistant_text=assistant_text,
-                    context=context,
-                )
-            if self.mode == "openrouter":
-                return self._label_openrouter(
-                    assistant_text=assistant_text,
-                    context=context,
-                )
-        except Exception:
-            if self.fallback == "heuristic":
-                return infer_dsl(
+            return mark_source(
+                infer_dsl(
                     think,
                     assistant_text,
                     prior_tool_text=prior_tool_text,
+                ),
+                "heuristic",
+            )
+        try:
+            if self.mode == "local_grammar":
+                return mark_source(
+                    self._label_local_grammar(
+                        assistant_text=assistant_text,
+                        context=context,
+                    ),
+                    "local_grammar",
+                )
+            if self.mode == "openrouter":
+                return mark_source(
+                    self._label_openrouter(
+                        assistant_text=assistant_text,
+                        context=context,
+                    ),
+                    "openrouter",
+                )
+        except Exception as exc:
+            if self.fallback == "heuristic":
+                return mark_source(
+                    infer_dsl(
+                        think,
+                        assistant_text,
+                        prior_tool_text=prior_tool_text,
+                    ),
+                    "heuristic_fallback",
+                    error=exc,
                 )
             if self.fallback == "skip":
                 raise
@@ -419,11 +501,8 @@ class DslLabeler:
             "grammar": DSL_LABEL_GRAMMAR,
         }
         response = self._post_chat(payload, api_key=None)
-        content = (
-            response.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
+        message = response.get("choices", [{}])[0].get("message", {})
+        content = self._message_text(message)
         dsl = parse_dsl_text(content)
         expected_next = "tool_call" if has_tool_call(assistant_text) else "final"
         dsl["NEXT"] = expected_next
@@ -458,16 +537,20 @@ class DslLabeler:
             },
         }
         response = self._post_chat(payload, api_key=api_key)
-        content = (
-            response.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "{}")
-        )
+        message = response.get("choices", [{}])[0].get("message", {})
+        content = self._message_text(message) or "{}"
         dsl = json.loads(content)
         validate_dsl(dsl)
         expected_next = "tool_call" if has_tool_call(assistant_text) else "final"
         dsl["NEXT"] = expected_next
         return dsl
+
+    def _message_text(self, message: dict[str, Any]) -> str:
+        for key in ("content", "reasoning_content", "reasoning"):
+            value = message.get(key)
+            if value:
+                return str(value)
+        return ""
 
     def _get_default_model(self) -> str:
         req = urllib.request.Request(
@@ -489,8 +572,9 @@ def infer_dsl(
     prior_tool_text: str = "",
 ) -> dict[str, str]:
     text = compact_ws(think)
-    prior = compact_ws(prior_tool_text)
-    combined = compact_ws(think + " " + prior_tool_text)
+    prior_failed = tool_response_failed(prior_tool_text)
+    prior_signal = " tool_failed" if prior_failed else ""
+    combined = compact_ws(think + prior_signal)
     next_action = "tool_call" if has_tool_call(assistant_text) else "final"
 
     if next_action == "final":
@@ -515,6 +599,7 @@ def infer_dsl(
         "unavailable",
         "success false",
         '"success": false',
+        "tool_failed",
     ]
     verify_markers = [
         "verify",
@@ -544,21 +629,6 @@ def infer_dsl(
         "quote",
         "malformed",
     ]
-
-    prior_failed = has_any(
-        prior,
-        [
-            "error",
-            "failed",
-            "failure",
-            "exception",
-            "not available",
-            "unavailable",
-            "success false",
-            '"success": false',
-            "exit_code\": 1",
-        ],
-    )
 
     if prior_failed or has_any(combined, repair_markers):
         plan = "seq(observe,act,verify,repair,finish)"
@@ -757,6 +827,7 @@ def main() -> None:
     written = 0
     rewritten_total = 0
     skipped = 0
+    label_source_counts: dict[str, int] = {}
     with args.out.open("w") as f:
         for row in rows:
             if args.limit is not None and seen >= args.limit:
@@ -781,6 +852,9 @@ def main() -> None:
             if rewrites < args.min_rewrites:
                 continue
             rewritten_total += rewrites
+            for label in converted["dsl_stats"]["labels"]:
+                source = label.get("_source", "unknown")
+                label_source_counts[source] = label_source_counts.get(source, 0) + 1
             f.write(json.dumps(converted, ensure_ascii=False) + "\n")
             written += 1
 
@@ -792,6 +866,7 @@ def main() -> None:
                 "rows_skipped": skipped,
                 "rewritten_think_blocks": rewritten_total,
                 "labeler": args.labeler,
+                "label_source_counts": label_source_counts,
                 "out": str(args.out),
             },
             indent=2,
