@@ -263,12 +263,23 @@ STATE: need_verify
 RISK: bad_tool_args
 NEXT: tool_call
 </think>
+<tool_call>
+{"name": "search_files", "arguments": {"pattern": "*.yaml"}}
+</tool_call>
 ```
 
+By default, natural-language prose between `</think>` and `<tool_call>` is
+stripped so the SFT target teaches abstract reasoning followed directly by tool
+calls. Pass `--keep-pre-tool-prose` if you want to preserve the original
+assistant prose. This script is still a heuristic bootstrapper: it uses the
+teacher trace and previous tool response to choose labels such as
+`RISK: tool_failure`, but an LLM relabeling pass is the cleaner next step before
+serious training.
+
 This treats the larger-model rollouts as noisy action demonstrations, not as
-ground-truth prose reasoning. The compact DSL is generated from the teacher
-trace and is meant for LoRA/SFT experiments where the model learns the symbolic
-state language before emitting normal tool calls.
+ground-truth prose reasoning. The compact DSL is meant for LoRA/SFT experiments
+where the model learns the symbolic state language before emitting normal tool
+calls.
 
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata

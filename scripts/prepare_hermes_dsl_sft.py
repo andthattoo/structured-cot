@@ -44,6 +44,9 @@ THINK_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.DOTALL | re.IGNORECASE)
 TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE
 )
+THINK_BLOCK_RE = re.compile(
+    r"(<think>\s*.*?\s*</think>)", re.DOTALL | re.IGNORECASE
+)
 
 ROLE_MAP = {
     "system": "system",
@@ -94,6 +97,15 @@ def parse_args() -> argparse.Namespace:
         "--no-text",
         action="store_true",
         help="Do not include a rendered ChatML-ish text field.",
+    )
+    parser.add_argument(
+        "--keep-pre-tool-prose",
+        action="store_true",
+        help=(
+            "Keep natural-language assistant prose between </think> and "
+            "<tool_call>. By default it is stripped to teach abstract reasoning "
+            "followed directly by tool calls."
+        ),
     )
     return parser.parse_args()
 
@@ -160,8 +172,15 @@ def has_tool_call(assistant_text: str) -> bool:
     return TOOL_CALL_RE.search(assistant_text) is not None
 
 
-def infer_dsl(think: str, assistant_text: str) -> dict[str, str]:
+def infer_dsl(
+    think: str,
+    assistant_text: str,
+    *,
+    prior_tool_text: str = "",
+) -> dict[str, str]:
     text = compact_ws(think)
+    prior = compact_ws(prior_tool_text)
+    combined = compact_ws(think + " " + prior_tool_text)
     next_action = "tool_call" if has_tool_call(assistant_text) else "final"
 
     if next_action == "final":
@@ -182,6 +201,10 @@ def infer_dsl(think: str, assistant_text: str) -> dict[str, str]:
         "debug",
         "retry",
         "wrong",
+        "not available",
+        "unavailable",
+        "success false",
+        '"success": false',
     ]
     verify_markers = [
         "verify",
@@ -212,26 +235,43 @@ def infer_dsl(think: str, assistant_text: str) -> dict[str, str]:
         "malformed",
     ]
 
-    if has_any(text, repair_markers):
+    prior_failed = has_any(
+        prior,
+        [
+            "error",
+            "failed",
+            "failure",
+            "exception",
+            "not available",
+            "unavailable",
+            "success false",
+            '"success": false',
+            "exit_code\": 1",
+        ],
+    )
+
+    if prior_failed or has_any(combined, repair_markers):
         plan = "seq(observe,act,verify,repair,finish)"
         state = "need_fix"
-    elif has_any(text, verify_markers):
+    elif has_any(combined, verify_markers):
         plan = "seq(observe,act,verify,finish)"
         state = "need_verify"
-    elif has_any(text, context_markers):
+    elif has_any(combined, context_markers):
         plan = "seq(observe,act,verify,finish)"
         state = "need_context"
     else:
         plan = "seq(observe,act,verify,finish)"
         state = "need_action"
 
-    if has_any(text, arg_markers):
-        risk = "bad_tool_args"
-    elif has_any(text, ["ambiguous", "unclear", "missing", "not enough", "unknown"]):
-        risk = "missing_context"
-    elif has_any(text, ["repeat", "again", "same command", "loop"]):
+    if prior_failed:
+        risk = "tool_failure"
+    elif has_any(combined, ["repeat", "again", "same command", "loop"]):
         risk = "repeat_loop"
-    elif has_any(text, repair_markers):
+    elif has_any(combined, arg_markers):
+        risk = "bad_tool_args"
+    elif has_any(combined, ["ambiguous", "unclear", "missing", "not enough", "unknown"]):
+        risk = "missing_context"
+    elif has_any(combined, repair_markers):
         risk = "tool_failure"
     elif "finish" in text or "complete" in text or "done" in text:
         risk = "premature_final"
@@ -250,16 +290,33 @@ def render_dsl(dsl: dict[str, str]) -> str:
     )
 
 
-def rewrite_assistant_value(value: str) -> tuple[str, int, list[dict[str, str]]]:
+def strip_pre_tool_prose(value: str) -> str:
+    if not has_tool_call(value):
+        return value
+    think_match = THINK_BLOCK_RE.search(value)
+    tool_match = TOOL_CALL_RE.search(value)
+    if not think_match or not tool_match or tool_match.start() < think_match.end():
+        return value
+    return value[: think_match.end()].rstrip() + "\n" + value[tool_match.start() :].lstrip()
+
+
+def rewrite_assistant_value(
+    value: str,
+    *,
+    prior_tool_text: str = "",
+    strip_prose_before_tool: bool = True,
+) -> tuple[str, int, list[dict[str, str]]]:
     rewrites: list[dict[str, str]] = []
 
     def replace(match: re.Match[str]) -> str:
         think = match.group(1)
-        dsl = infer_dsl(think, value)
+        dsl = infer_dsl(think, value, prior_tool_text=prior_tool_text)
         rewrites.append(dsl)
         return "<think>\n" + render_dsl(dsl) + "\n</think>"
 
     rewritten, count = THINK_RE.subn(replace, value, count=1)
+    if count and strip_prose_before_tool:
+        rewritten = strip_pre_tool_prose(rewritten)
     return rewritten, count, rewrites
 
 
@@ -293,23 +350,33 @@ def convert_row(
     *,
     add_system_prompt: bool,
     include_text: bool,
+    strip_prose_before_tool: bool,
 ) -> dict[str, Any]:
     conversations = normalize_conversations(row.get("conversations", []))
     rewritten_conversations: list[dict[str, str]] = []
     rewritten_blocks = 0
     tool_turns = 0
     labels: list[dict[str, str]] = []
+    prior_tool_text = ""
 
     for item in conversations:
         new_item = dict(item)
         role = ROLE_MAP.get(new_item["from"], new_item["from"])
         if role == "assistant":
-            new_value, count, row_labels = rewrite_assistant_value(new_item["value"])
+            new_value, count, row_labels = rewrite_assistant_value(
+                new_item["value"],
+                prior_tool_text=prior_tool_text,
+                strip_prose_before_tool=strip_prose_before_tool,
+            )
             new_item["value"] = new_value
             rewritten_blocks += count
             labels.extend(row_labels)
             if has_tool_call(new_value):
                 tool_turns += 1
+        elif role == "tool":
+            prior_tool_text = new_item["value"]
+        if role != "tool" and role != "assistant":
+            prior_tool_text = ""
         rewritten_conversations.append(new_item)
 
     if add_system_prompt:
@@ -357,6 +424,7 @@ def main() -> None:
                 row,
                 add_system_prompt=not args.no_system_dsl_prompt,
                 include_text=not args.no_text,
+                strip_prose_before_tool=not args.keep_pre_tool_prose,
             )
             rewrites = int(converted["dsl_stats"]["rewritten_think_blocks"])
             if rewrites < args.min_rewrites:
