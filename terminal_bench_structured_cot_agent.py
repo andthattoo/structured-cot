@@ -42,6 +42,15 @@ next ::= "inspect" | "edit" | "run_tests" | "debug" | "verify" | "finish"
 '''
 
 
+DSL_GRAMMAR = r'''
+root ::= "PLAN: " plan "\n" "STATE: " state "\n" "RISK: " risk "\n" "NEXT: " next "\n"
+plan ::= "seq(inspect,act,verify,finish)" | "seq(inspect,edit,verify,finish)" | "seq(inspect,test,debug,verify,finish)" | "fallback(verify,debug,finish)" | "retry(inspect,act,verify)"
+state ::= "unknown" | "need_context" | "need_action" | "need_fix" | "need_verify" | "blocked" | "ready"
+risk ::= "none" | "missing_context" | "bad_tool_args" | "wrong_target" | "test_failure" | "premature_finish" | "repeat_loop"
+next ::= "run_shell" | "finish"
+'''
+
+
 RUN_SHELL_TOOL = {
     "type": "function",
     "function": {
@@ -158,10 +167,12 @@ class StructuredCotTerminalAgent(BaseAgent):
             payload["grammar"] = STEP_STATUS_GRAMMAR
         elif self.grammar_mode == "phase":
             payload["grammar"] = PHASE_GRAMMAR
+        elif self.grammar_mode == "dsl":
+            payload["grammar"] = DSL_GRAMMAR
         elif self.grammar_mode not in {"none", "free"}:
             raise ValueError(
                 "grammar_mode must be 'none', 'free', 'reasoning', "
-                "'step_status', or 'phase', "
+                "'step_status', 'phase', or 'dsl', "
                 f"got {self.grammar_mode!r}"
             )
         return payload

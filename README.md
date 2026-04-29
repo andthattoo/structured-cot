@@ -192,7 +192,24 @@ GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
 GRAMMAR_MODE=reasoning ./scripts/run_terminal_bench_smoke.sh  # STEP only
 GRAMMAR_MODE=step_status ./scripts/run_terminal_bench_smoke.sh # STEP/STATUS
 GRAMMAR_MODE=phase ./scripts/run_terminal_bench_smoke.sh      # PHASE/CHECK/NEXT
+GRAMMAR_MODE=dsl ./scripts/run_terminal_bench_smoke.sh        # PLAN/STATE/RISK/NEXT
 ```
+
+The `dsl` mode is a tiny existing-token symbolic trace, meant as a first
+step toward "abstract CoT without new tokens":
+
+```text
+PLAN: seq(inspect,edit,verify,finish)
+STATE: need_verify
+RISK: premature_finish
+NEXT: run_shell
+```
+
+It is deliberately closer to behavior-tree / HTN control flow than natural
+language prose. The current version is still a hand-written inference-time
+grammar; the longer-term experiment is to mine these labels from successful
+agent traces, then train or dynamically select compact reasoning-state
+grammars per turn.
 
 The script defaults to `terminal-bench-core==0.1.1` and `hello-world`. Override
 with `TASK_ID=...`, `DATASET=...`, `MODEL=...`, or `BASE_URL=...`. Use
