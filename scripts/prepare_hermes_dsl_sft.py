@@ -369,6 +369,42 @@ def validate_dsl(dsl: dict[str, str]) -> None:
         raise ValueError(f"invalid NEXT: {dsl['NEXT']!r}")
 
 
+def normalize_dsl(
+    dsl: dict[str, str],
+    *,
+    assistant_text: str,
+    prior_tool_text: str = "",
+) -> dict[str, str]:
+    normalized = dict(dsl)
+    normalized["NEXT"] = "tool_call" if has_tool_call(assistant_text) else "final"
+
+    if normalized["NEXT"] == "final":
+        normalized["PLAN"] = "seq(observe,verify,finish)"
+        normalized["STATE"] = "ready"
+        normalized["RISK"] = "none"
+        return normalized
+
+    if normalized["PLAN"] == "seq(observe,verify,finish)":
+        normalized["PLAN"] = "seq(observe,act,verify,finish)"
+
+    if normalized["STATE"] == "ready":
+        if tool_response_failed(prior_tool_text):
+            normalized["STATE"] = "need_fix"
+            normalized["RISK"] = "tool_failure"
+            normalized["PLAN"] = "seq(observe,act,verify,repair,finish)"
+        elif normalized["RISK"] == "missing_context":
+            normalized["STATE"] = "need_context"
+        else:
+            normalized["STATE"] = "need_action"
+
+    if normalized["RISK"] == "tool_failure":
+        normalized["STATE"] = "need_fix"
+        normalized["PLAN"] = "seq(observe,act,verify,repair,finish)"
+
+    validate_dsl(normalized)
+    return normalized
+
+
 class DslLabeler:
     def __init__(
         self,
@@ -414,6 +450,7 @@ class DslLabeler:
                 return mark_source(
                     self._label_local_grammar(
                         assistant_text=assistant_text,
+                        prior_tool_text=prior_tool_text,
                         context=context,
                     ),
                     "local_grammar",
@@ -422,6 +459,7 @@ class DslLabeler:
                 return mark_source(
                     self._label_openrouter(
                         assistant_text=assistant_text,
+                        prior_tool_text=prior_tool_text,
                         context=context,
                     ),
                     "openrouter",
@@ -523,7 +561,13 @@ class DslLabeler:
         with urllib.request.urlopen(req, timeout=self.timeout_sec) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def _label_local_grammar(self, *, assistant_text: str, context: str) -> dict[str, str]:
+    def _label_local_grammar(
+        self,
+        *,
+        assistant_text: str,
+        prior_tool_text: str,
+        context: str,
+    ) -> dict[str, str]:
         payload = {
             "model": self.model or self._get_default_model(),
             "messages": self._messages(context),
@@ -535,11 +579,19 @@ class DslLabeler:
         message = response.get("choices", [{}])[0].get("message", {})
         content = self._message_text(message)
         dsl = parse_dsl_text(content)
-        expected_next = "tool_call" if has_tool_call(assistant_text) else "final"
-        dsl["NEXT"] = expected_next
-        return dsl
+        return normalize_dsl(
+            dsl,
+            assistant_text=assistant_text,
+            prior_tool_text=prior_tool_text,
+        )
 
-    def _label_openrouter(self, *, assistant_text: str, context: str) -> dict[str, str]:
+    def _label_openrouter(
+        self,
+        *,
+        assistant_text: str,
+        prior_tool_text: str,
+        context: str,
+    ) -> dict[str, str]:
         api_key = os.environ.get(self.api_key_env)
         if not api_key:
             raise RuntimeError(f"{self.api_key_env} is not set")
@@ -572,9 +624,11 @@ class DslLabeler:
         content = self._message_text(message) or "{}"
         dsl = json.loads(content)
         validate_dsl(dsl)
-        expected_next = "tool_call" if has_tool_call(assistant_text) else "final"
-        dsl["NEXT"] = expected_next
-        return dsl
+        return normalize_dsl(
+            dsl,
+            assistant_text=assistant_text,
+            prior_tool_text=prior_tool_text,
+        )
 
     def _message_text(self, message: dict[str, Any]) -> str:
         for key in ("content", "reasoning_content", "reasoning"):
