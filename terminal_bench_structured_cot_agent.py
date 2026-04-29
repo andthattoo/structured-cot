@@ -27,6 +27,13 @@ step ::= "inspect" | "edit" | "test" | "verify" | "finish"
 '''
 
 
+STEP_STATUS_GRAMMAR = r'''
+root ::= "STEP: " step "\n" "STATUS: " status "\n"
+step ::= "inspect" | "edit" | "test" | "debug" | "verify" | "finish"
+status ::= "unknown" | "in_progress" | "blocked" | "failing" | "passed" | "done"
+'''
+
+
 PHASE_GRAMMAR = r'''
 root ::= "PHASE: " phase "\n" "CHECK: " check "\n" "NEXT: " next "\n"
 phase ::= "inspect" | "plan" | "edit" | "test" | "debug" | "verify" | "finish"
@@ -147,11 +154,14 @@ class StructuredCotTerminalAgent(BaseAgent):
         }
         if self.grammar_mode == "reasoning":
             payload["grammar"] = REASONING_INNER_GRAMMAR
+        elif self.grammar_mode == "step_status":
+            payload["grammar"] = STEP_STATUS_GRAMMAR
         elif self.grammar_mode == "phase":
             payload["grammar"] = PHASE_GRAMMAR
         elif self.grammar_mode not in {"none", "free"}:
             raise ValueError(
-                "grammar_mode must be 'none', 'free', 'reasoning', or 'phase', "
+                "grammar_mode must be 'none', 'free', 'reasoning', "
+                "'step_status', or 'phase', "
                 f"got {self.grammar_mode!r}"
             )
         return payload
