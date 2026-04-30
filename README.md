@@ -436,7 +436,12 @@ uv run --with torch --with sentence-transformers python scripts/train_mqe_critic
 This critic is not a verifier. It learns a progress heuristic from offline
 rollout order: real actions should reduce directed distance to the final goal
 state. Use it later to rank/filter self-distilled candidate actions alongside
-hard validity checks for DSL/action JSON.
+hard validity checks for DSL/action JSON. The most relevant action-ranking
+metrics are `val_action_choice_acc` and `val_action_choice_margin`, which
+compare the real next action against shuffled negative actions for the same
+state/goal. `val_spearman_state` is useful for checking whether the critic
+understands rollout progress, but it is not enough on its own for action
+selection.
 
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata

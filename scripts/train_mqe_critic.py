@@ -55,6 +55,10 @@ class MQETrainConfig:
     monotonic_margin: float = 0.02
     pairwise_loss_weight: float = 0.5
     pairwise_margin: float = 0.02
+    action_contrastive_loss_weight: float = 0.5
+    action_contrastive_margin: float = 0.02
+    action_contrastive_negatives: int = 4
+    action_choice_eval_negatives: int = 8
     multistep_loss_weight: float = 0.5
     multistep_batch_size: int = 1024
     multistep_max_terms: int = 50000
@@ -632,6 +636,42 @@ def compute_loss(outputs, batch, config: MQETrainConfig):
     }
 
 
+def action_contrastive_loss(model, batch, config: MQETrainConfig):
+    """Rank the real action below shuffled negative actions for the same state/goal."""
+    import torch
+    _, _, F, _, _ = require_torch()
+
+    negatives = int(config.action_contrastive_negatives)
+    if negatives <= 0 or batch["action"].shape[0] < 2:
+        zero = next(model.parameters()).sum() * 0.0
+        return zero, {"loss_action_contrastive": 0.0, "action_contrastive_acc": 0.0}
+
+    batch_size = batch["action"].shape[0]
+    state_z = model.embed_state(batch["state"])
+    goal_z = model.embed_goal(batch["goal"])
+    positive_z = model.embed_state_action(batch["state"], batch["action"])
+    positive = model.qdist(positive_z, goal_z)
+
+    losses = []
+    accuracies = []
+    for _ in range(negatives):
+        perm = torch.randperm(batch_size, device=batch["action"].device)
+        if batch_size > 1:
+            identity = perm == torch.arange(batch_size, device=batch["action"].device)
+            perm[identity] = (perm[identity] + 1) % batch_size
+        negative_z = model.embed_state_action(batch["state"], batch["action"][perm])
+        negative = model.qdist(negative_z, goal_z)
+        losses.append(F.relu(positive - negative + config.action_contrastive_margin).mean())
+        accuracies.append((positive < negative).to(torch.float32).mean())
+
+    loss = torch.stack(losses).mean()
+    acc = torch.stack(accuracies).mean()
+    return loss, {
+        "loss_action_contrastive": float(loss.detach().cpu()),
+        "action_contrastive_acc": float(acc.detach().cpu()),
+    }
+
+
 def evaluate(model, rows, embeddings, config: MQETrainConfig, device: str) -> dict[str, float]:
     torch, _, _, DataLoader, _ = require_torch()
 
@@ -647,6 +687,11 @@ def evaluate(model, rows, embeddings, config: MQETrainConfig, device: str) -> di
     targets: list[float] = []
     action_preds: list[float] = []
     action_targets: list[float] = []
+    choice_correct = 0
+    choice_total = 0
+    improvement_margins: list[float] = []
+    rng = random.Random(config.seed + 7331)
+    all_action_indices = [row["action_idx"] for row in rows]
     scale = float(config.distance_scale or 1.0)
     with torch.no_grad():
         for batch in loader:
@@ -658,10 +703,41 @@ def evaluate(model, rows, embeddings, config: MQETrainConfig, device: str) -> di
             action_preds.extend((outputs["action_distance"] * scale).detach().cpu().tolist())
             action_targets.extend((batch["next_target"] * scale).detach().cpu().tolist())
 
+        if config.action_choice_eval_negatives > 0 and len(all_action_indices) > 1:
+            state_idx = torch.tensor([row["state_idx"] for row in rows], dtype=torch.long)
+            goal_idx = torch.tensor([row["goal_idx"] for row in rows], dtype=torch.long)
+            pos_action_idx = torch.tensor([row["action_idx"] for row in rows], dtype=torch.long)
+            states = embeddings[state_idx].to(device)
+            goals = embeddings[goal_idx].to(device)
+            pos_actions = embeddings[pos_action_idx].to(device)
+            state_z = model.embed_state(states)
+            goal_z = model.embed_goal(goals)
+            state_distance = model.qdist(state_z, goal_z)
+            pos_distance = model.qdist(model.embed_state_action(states, pos_actions), goal_z)
+            best_negative = None
+            for _ in range(config.action_choice_eval_negatives):
+                neg_indices = []
+                for row in rows:
+                    candidate = row["action_idx"]
+                    while candidate == row["action_idx"]:
+                        candidate = rng.choice(all_action_indices)
+                    neg_indices.append(candidate)
+                neg_actions = embeddings[torch.tensor(neg_indices, dtype=torch.long)].to(device)
+                neg_distance = model.qdist(model.embed_state_action(states, neg_actions), goal_z)
+                best_negative = neg_distance if best_negative is None else torch.minimum(best_negative, neg_distance)
+            if best_negative is not None:
+                choice_correct = int((pos_distance < best_negative).sum().detach().cpu())
+                choice_total = len(rows)
+                pos_improvement = state_distance - pos_distance
+                neg_improvement = state_distance - best_negative
+                improvement_margins = (pos_improvement - neg_improvement).detach().cpu().tolist()
+
     mae = sum(abs(p - t) for p, t in zip(preds, targets)) / max(1, len(targets))
     action_mae = sum(abs(p - t) for p, t in zip(action_preds, action_targets)) / max(1, len(action_targets))
     spearman_state = spearman(preds, targets)
     spearman_action = spearman(action_preds, action_targets)
+    choice_acc = choice_correct / choice_total if choice_total else 0.0
+    mean_margin = sum(improvement_margins) / max(1, len(improvement_margins))
     return {
         "loss": sum(losses) / max(1, len(losses)),
         "mae_steps": mae,
@@ -669,6 +745,8 @@ def evaluate(model, rows, embeddings, config: MQETrainConfig, device: str) -> di
         "spearman_state": spearman_state,
         "spearman_action": spearman_action,
         "spearman_mean": (spearman_state + spearman_action) / 2.0,
+        "action_choice_acc": choice_acc,
+        "action_choice_margin": mean_margin,
     }
 
 
@@ -743,6 +821,10 @@ def train_mqe(config: MQETrainConfig) -> dict[str, Any]:
             optimizer.zero_grad(set_to_none=True)
             outputs = model(batch["state"], batch["next_state"], batch["goal"], batch["action"])
             loss, parts = compute_loss(outputs, batch, config)
+            if config.action_contrastive_loss_weight > 0:
+                contrastive_loss, contrastive_parts = action_contrastive_loss(model, batch, config)
+                loss = loss + config.action_contrastive_loss_weight * contrastive_loss
+                parts.update(contrastive_parts)
             if config.multistep_loss_weight > 0:
                 multi_loss, multi_parts = sample_multistep_loss(
                     model, train_rows, multistep_terms, embeddings, device, config, multistep_rng
@@ -839,6 +921,10 @@ def parse_args(argv: list[str] | None = None) -> MQETrainConfig:
     parser.add_argument("--monotonic-margin", type=float, default=0.02)
     parser.add_argument("--pairwise-loss-weight", type=float, default=0.5)
     parser.add_argument("--pairwise-margin", type=float, default=0.02)
+    parser.add_argument("--action-contrastive-loss-weight", type=float, default=0.5)
+    parser.add_argument("--action-contrastive-margin", type=float, default=0.02)
+    parser.add_argument("--action-contrastive-negatives", type=int, default=4)
+    parser.add_argument("--action-choice-eval-negatives", type=int, default=8)
     parser.add_argument("--multistep-loss-weight", type=float, default=0.5)
     parser.add_argument("--multistep-batch-size", type=int, default=1024)
     parser.add_argument("--multistep-max-terms", type=int, default=50000)
