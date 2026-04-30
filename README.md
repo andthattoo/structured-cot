@@ -308,6 +308,28 @@ uv run python scripts/prepare_hermes_dsl_sft.py \
     --out hermes_dsl_sft_openrouter_labeled.jsonl
 ```
 
+For a first pure-SFT LoRA pilot on a labeled JSONL file:
+
+```bash
+uv run --with peft --with accelerate --with bitsandbytes \
+  python scripts/train_dsl_sft_lora.py \
+    --train-jsonl hermes_dsl_sft_local_labeled_200_rerun.jsonl \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --output-dir runs/dsl-sft-qwen2p5-7b-lora \
+    --max-seq-len 4096 \
+    --context-messages 12 \
+    --epochs 1 \
+    --batch-size 1 \
+    --grad-accum 16 \
+    --learning-rate 2e-4
+```
+
+This is plain behavior-cloning SFT: no KL, no preference tuning, and no RL. The
+script creates one example per assistant turn and masks all context tokens, so
+the loss is only on the current assistant DSL/tool-call/final-answer message.
+It trains a LoRA adapter from a Hugging Face Transformers checkpoint; GGUF files
+served by llama.cpp cannot be fine-tuned directly.
+
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting
