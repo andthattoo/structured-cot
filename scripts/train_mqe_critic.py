@@ -59,6 +59,7 @@ class MQETrainConfig:
     action_contrastive_margin: float = 0.02
     action_contrastive_negatives: int = 4
     action_choice_eval_negatives: int = 8
+    use_action_features: bool = True
     multistep_loss_weight: float = 0.5
     multistep_batch_size: int = 1024
     multistep_max_terms: int = 50000
@@ -99,6 +100,22 @@ def _action_text(row: dict[str, Any]) -> str:
         or action.get("raw_json")
         or ""
     )
+
+
+def _action_features(row: dict[str, Any]) -> list[float]:
+    value = row.get("action_features")
+    if value is None and isinstance(row.get("action"), dict):
+        value = row["action"].get("features")
+    if not isinstance(value, list):
+        return []
+
+    features: list[float] = []
+    for item in value:
+        try:
+            features.append(float(item))
+        except (TypeError, ValueError):
+            features.append(0.0)
+    return features
 
 
 def _goal_text(row: dict[str, Any], mode: str = "concrete") -> str:
@@ -341,11 +358,26 @@ def build_indexed_rows(
                 "next_target": next_target,
                 "raw_target": float(row["target_distance_steps"]),
                 "raw_next_target": float(row["next_distance_steps"]),
+                "action_features": _action_features(row),
                 "example_id": row.get("example_id"),
                 "challenge_id": row.get("challenge_id"),
             }
         )
     return indexed
+
+
+def action_feature_dim(rows: list[dict[str, Any]], *, enabled: bool) -> int:
+    if not enabled:
+        return 0
+    return max((len(row.get("action_features") or []) for row in rows), default=0)
+
+
+def pad_action_features(rows: list[dict[str, Any]], dim: int) -> None:
+    for row in rows:
+        values = [float(value) for value in (row.get("action_features") or [])[:dim]]
+        if len(values) < dim:
+            values.extend([0.0] * (dim - len(values)))
+        row["action_features"] = values
 
 
 def require_torch():
@@ -372,12 +404,21 @@ def build_model_classes():
     torch, nn, F, _, _ = require_torch()
 
     class DirectedQuasimetricCritic(nn.Module):
-        def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int, mrn_components: int, dropout: float = 0.0):
+        def __init__(
+            self,
+            input_dim: int,
+            hidden_dim: int,
+            latent_dim: int,
+            mrn_components: int,
+            dropout: float = 0.0,
+            action_feature_dim: int = 0,
+        ):
             super().__init__()
             if latent_dim % mrn_components != 0:
                 raise ValueError("latent_dim must be divisible by mrn_components")
+            self.action_feature_dim = int(action_feature_dim)
             self.psi = make_mlp(nn, input_dim, hidden_dim, latent_dim, dropout)
-            self.phi = make_mlp(nn, input_dim * 2, hidden_dim, latent_dim, dropout)
+            self.phi = make_mlp(nn, input_dim * 2 + self.action_feature_dim, hidden_dim, latent_dim, dropout)
             self.mrn_components = mrn_components
             self.mrn_part_dim = latent_dim // mrn_components
 
@@ -394,14 +435,26 @@ def build_model_classes():
         def embed_goal(self, goal):
             return self.psi(goal)
 
-        def embed_state_action(self, state, action):
-            return self.phi(torch.cat([state, action], dim=-1))
+        def embed_state_action(self, state, action, action_features=None):
+            pieces = [state, action]
+            if self.action_feature_dim:
+                if action_features is None:
+                    action_features = state.new_zeros((*state.shape[:-1], self.action_feature_dim))
+                else:
+                    action_features = action_features.to(device=state.device, dtype=state.dtype)
+                    if action_features.shape[-1] < self.action_feature_dim:
+                        pad_shape = (*action_features.shape[:-1], self.action_feature_dim - action_features.shape[-1])
+                        action_features = torch.cat([action_features, state.new_zeros(pad_shape)], dim=-1)
+                    elif action_features.shape[-1] > self.action_feature_dim:
+                        action_features = action_features[..., : self.action_feature_dim]
+                pieces.append(action_features)
+            return self.phi(torch.cat(pieces, dim=-1))
 
-        def forward(self, state, next_state, goal, action):
+        def forward(self, state, next_state, goal, action, action_features=None):
             state_z = self.embed_state(state)
             next_z = self.embed_state(next_state)
             goal_z = self.embed_goal(goal)
-            state_action_z = self.embed_state_action(state, action)
+            state_action_z = self.embed_state_action(state, action, action_features)
             return {
                 "state_distance": self.qdist(state_z, goal_z),
                 "next_distance": self.qdist(next_z, goal_z),
@@ -419,11 +472,22 @@ def collate_batch(rows: list[dict[str, Any]], embeddings, device: str):
     def idx(key: str):
         return torch.tensor([row[key] for row in rows], dtype=torch.long)
 
+    feature_dim = len(rows[0].get("action_features") or []) if rows else 0
+    if feature_dim:
+        action_features = torch.tensor(
+            [row.get("action_features") or [0.0] * feature_dim for row in rows],
+            dtype=torch.float32,
+            device=device,
+        )
+    else:
+        action_features = torch.empty((len(rows), 0), dtype=torch.float32, device=device)
+
     return {
         "state": embeddings[idx("state_idx")].to(device),
         "next_state": embeddings[idx("next_state_idx")].to(device),
         "goal": embeddings[idx("goal_idx")].to(device),
         "action": embeddings[idx("action_idx")].to(device),
+        "action_features": action_features,
         "group_id": torch.tensor([row["group_id"] for row in rows], dtype=torch.long, device=device),
         "rollout_id": torch.tensor([row["rollout_id"] for row in rows], dtype=torch.long, device=device),
         "source_ordinal": torch.tensor([row["source_ordinal"] for row in rows], dtype=torch.long, device=device),
@@ -531,7 +595,14 @@ def sample_multistep_loss(model, rows, terms, embeddings, device: str, config: M
     actions = embeddings[action_idx].to(device)
     goals = embeddings[goal_idx].to(device)
     waypoints = embeddings[waypoint_idx].to(device)
-    state_action_z = model.embed_state_action(states, actions)
+    action_features = None
+    if getattr(model, "action_feature_dim", 0):
+        action_features = torch.tensor(
+            [row.get("action_features") or [] for row in direct_rows],
+            dtype=torch.float32,
+            device=device,
+        )
+    state_action_z = model.embed_state_action(states, actions, action_features)
     waypoint_z = model.embed_state(waypoints)
     goal_z = model.embed_goal(goals)
     pred = model.qdist(state_action_z, goal_z)
@@ -649,7 +720,7 @@ def action_contrastive_loss(model, batch, config: MQETrainConfig):
     batch_size = batch["action"].shape[0]
     state_z = model.embed_state(batch["state"])
     goal_z = model.embed_goal(batch["goal"])
-    positive_z = model.embed_state_action(batch["state"], batch["action"])
+    positive_z = model.embed_state_action(batch["state"], batch["action"], batch["action_features"])
     positive = model.qdist(positive_z, goal_z)
 
     losses = []
@@ -659,7 +730,7 @@ def action_contrastive_loss(model, batch, config: MQETrainConfig):
         if batch_size > 1:
             identity = perm == torch.arange(batch_size, device=batch["action"].device)
             perm[identity] = (perm[identity] + 1) % batch_size
-        negative_z = model.embed_state_action(batch["state"], batch["action"][perm])
+        negative_z = model.embed_state_action(batch["state"], batch["action"][perm], batch["action_features"][perm])
         negative = model.qdist(negative_z, goal_z)
         losses.append(F.relu(positive - negative + config.action_contrastive_margin).mean())
         accuracies.append((positive < negative).to(torch.float32).mean())
@@ -691,11 +762,11 @@ def evaluate(model, rows, embeddings, config: MQETrainConfig, device: str) -> di
     choice_total = 0
     improvement_margins: list[float] = []
     rng = random.Random(config.seed + 7331)
-    all_action_indices = [row["action_idx"] for row in rows]
+    all_action_row_indices = list(range(len(rows)))
     scale = float(config.distance_scale or 1.0)
     with torch.no_grad():
         for batch in loader:
-            outputs = model(batch["state"], batch["next_state"], batch["goal"], batch["action"])
+            outputs = model(batch["state"], batch["next_state"], batch["goal"], batch["action"], batch["action_features"])
             loss, _ = compute_loss(outputs, batch, config)
             losses.append(float(loss.detach().cpu()))
             preds.extend((outputs["state_distance"] * scale).detach().cpu().tolist())
@@ -703,7 +774,7 @@ def evaluate(model, rows, embeddings, config: MQETrainConfig, device: str) -> di
             action_preds.extend((outputs["action_distance"] * scale).detach().cpu().tolist())
             action_targets.extend((batch["next_target"] * scale).detach().cpu().tolist())
 
-        if config.action_choice_eval_negatives > 0 and len(all_action_indices) > 1:
+        if config.action_choice_eval_negatives > 0 and len(all_action_row_indices) > 1:
             state_idx = torch.tensor([row["state_idx"] for row in rows], dtype=torch.long)
             goal_idx = torch.tensor([row["goal_idx"] for row in rows], dtype=torch.long)
             pos_action_idx = torch.tensor([row["action_idx"] for row in rows], dtype=torch.long)
@@ -713,17 +784,26 @@ def evaluate(model, rows, embeddings, config: MQETrainConfig, device: str) -> di
             state_z = model.embed_state(states)
             goal_z = model.embed_goal(goals)
             state_distance = model.qdist(state_z, goal_z)
-            pos_distance = model.qdist(model.embed_state_action(states, pos_actions), goal_z)
+            pos_features = torch.tensor(
+                [row.get("action_features") or [] for row in rows],
+                dtype=torch.float32,
+                device=device,
+            )
+            pos_distance = model.qdist(model.embed_state_action(states, pos_actions, pos_features), goal_z)
             best_negative = None
             for _ in range(config.action_choice_eval_negatives):
                 neg_indices = []
-                for row in rows:
-                    candidate = row["action_idx"]
-                    while candidate == row["action_idx"]:
-                        candidate = rng.choice(all_action_indices)
-                    neg_indices.append(candidate)
+                neg_features = []
+                for row_index, row in enumerate(rows):
+                    candidate_index = row_index
+                    while candidate_index == row_index:
+                        candidate_index = rng.choice(all_action_row_indices)
+                    candidate = rows[candidate_index]
+                    neg_indices.append(candidate["action_idx"])
+                    neg_features.append(candidate.get("action_features") or [])
                 neg_actions = embeddings[torch.tensor(neg_indices, dtype=torch.long)].to(device)
-                neg_distance = model.qdist(model.embed_state_action(states, neg_actions), goal_z)
+                neg_feature_tensor = torch.tensor(neg_features, dtype=torch.float32, device=device)
+                neg_distance = model.qdist(model.embed_state_action(states, neg_actions, neg_feature_tensor), goal_z)
                 best_negative = neg_distance if best_negative is None else torch.minimum(best_negative, neg_distance)
             if best_negative is not None:
                 choice_correct = int((pos_distance < best_negative).sum().detach().cpu())
@@ -791,12 +871,17 @@ def train_mqe(config: MQETrainConfig) -> dict[str, Any]:
     input_dim = int(embeddings.shape[1])
     train_rows = build_indexed_rows(train_raw, text_to_index, float(config.distance_scale), config.goal_text_mode)
     val_rows = build_indexed_rows(val_raw, text_to_index, float(config.distance_scale), config.goal_text_mode)
+    action_dim = action_feature_dim(train_rows + val_rows, enabled=config.use_action_features)
+    pad_action_features(train_rows, action_dim)
+    pad_action_features(val_rows, action_dim)
     multistep_terms = build_multistep_terms(train_rows, config)
     triangle_terms = build_triangle_terms(train_rows, config.triangle_max_terms, config.seed)
 
     device = resolve_device(config.device)
     model_cls = build_model_classes()
-    model = model_cls(input_dim, config.hidden_dim, config.latent_dim, config.mrn_components, config.dropout).to(device)
+    model = model_cls(input_dim, config.hidden_dim, config.latent_dim, config.mrn_components, config.dropout, action_dim).to(
+        device
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     dataset = IndexedMQEDataset(train_rows)
     output_dir = Path(config.output_dir)
@@ -819,7 +904,7 @@ def train_mqe(config: MQETrainConfig) -> dict[str, Any]:
         parts_by_name: dict[str, list[float]] = {}
         for batch in loader:
             optimizer.zero_grad(set_to_none=True)
-            outputs = model(batch["state"], batch["next_state"], batch["goal"], batch["action"])
+            outputs = model(batch["state"], batch["next_state"], batch["goal"], batch["action"], batch["action_features"])
             loss, parts = compute_loss(outputs, batch, config)
             if config.action_contrastive_loss_weight > 0:
                 contrastive_loss, contrastive_parts = action_contrastive_loss(model, batch, config)
@@ -868,6 +953,7 @@ def train_mqe(config: MQETrainConfig) -> dict[str, Any]:
                     "model_state_dict": model.state_dict(),
                     "config": asdict(config),
                     "input_dim": input_dim,
+                    "action_feature_dim": action_dim,
                     "model_class": "DirectedQuasimetricCritic",
                     "distance_scale": config.distance_scale,
                     "best_metric": config.checkpoint_metric,
@@ -883,6 +969,7 @@ def train_mqe(config: MQETrainConfig) -> dict[str, Any]:
         "val_rows": len(val_rows),
         "unique_texts": len(text_to_index),
         "input_dim": input_dim,
+        "action_feature_dim": action_dim,
         "goal_state_texts_attached": {"train": train_goal_texts, "val": val_goal_texts},
         "multistep_terms": len(multistep_terms),
         "triangle_terms": len(triangle_terms),
@@ -925,6 +1012,7 @@ def parse_args(argv: list[str] | None = None) -> MQETrainConfig:
     parser.add_argument("--action-contrastive-margin", type=float, default=0.02)
     parser.add_argument("--action-contrastive-negatives", type=int, default=4)
     parser.add_argument("--action-choice-eval-negatives", type=int, default=8)
+    parser.add_argument("--use-action-features", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--multistep-loss-weight", type=float, default=0.5)
     parser.add_argument("--multistep-batch-size", type=int, default=1024)
     parser.add_argument("--multistep-max-terms", type=int, default=50000)
@@ -957,6 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
                 "val_rows": summary["val_rows"],
                 "unique_texts": summary["unique_texts"],
                 "input_dim": summary["input_dim"],
+                "action_feature_dim": summary["action_feature_dim"],
                 "multistep_terms": summary["multistep_terms"],
                 "triangle_terms": summary["triangle_terms"],
                 "final_metrics": summary["metrics"][-1] if summary["metrics"] else {},

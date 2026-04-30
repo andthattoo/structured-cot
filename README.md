@@ -404,15 +404,19 @@ uv run --with datasets python scripts/prepare_agenttrove_mqe.py \
   --dataset open-thoughts/AgentTrove \
   --limit-rollouts 1000 \
   --scan-limit 200000 \
-  --out-dir data/mqe/agenttrove_1k
+  --out-dir data/mqe/agenttrove_1k_features
 ```
+
+The prepared rows include `action_features`: compact verb, flag, path, mutation,
+test, network, install, and hashed argument features. Regenerate the data after
+pulling this change; old MQE dirs still train, but their feature branch is empty.
 
 For a fast hashing-encoder smoke train:
 
 ```bash
 uv run --with torch python scripts/train_mqe_critic.py \
-  --data-dir data/mqe/agenttrove_1k \
-  --output-dir outputs/mqe/agenttrove_hash_1k \
+  --data-dir data/mqe/agenttrove_1k_features \
+  --output-dir outputs/mqe/agenttrove_hash_1k_features \
   --encoder-backend hashing \
   --embedding-dim 2048 \
   --epochs 10
@@ -423,15 +427,20 @@ model:
 
 ```bash
 uv run --with torch --with sentence-transformers python scripts/train_mqe_critic.py \
-  --data-dir data/mqe/agenttrove_1k \
-  --output-dir outputs/mqe/agenttrove_qwen_embed_1k \
+  --data-dir data/mqe/agenttrove_1k_features \
+  --output-dir outputs/mqe/agenttrove_qwen_embed_1k_features \
   --encoder-backend sentence-transformers \
   --encoder-model Qwen/Qwen3-Embedding-4B \
   --encoder-device cuda \
   --encoder-dtype bfloat16 \
-  --cache-path data/mqe/cache/agenttrove_1k_qwen3_embed.pt \
+  --encoder-max-length 2048 \
+  --embed-batch-size 8 \
+  --cache-path data/mqe/cache/agenttrove_1k_features_qwen3_embed_len2048_b8.pt \
   --epochs 10
 ```
+
+Use `--no-use-action-features` as an ablation if you want to compare against the
+text-embedding-only action head.
 
 This critic is not a verifier. It learns a progress heuristic from offline
 rollout order: real actions should reduce directed distance to the final goal

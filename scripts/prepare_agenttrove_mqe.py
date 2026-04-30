@@ -20,12 +20,88 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
 
 DEFAULT_DATASET = "open-thoughts/AgentTrove"
+ACTION_HASH_DIM = 64
+COMMAND_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:=?&%{}$'\"+\-]+")
+PATH_TOKEN_RE = re.compile(r"(?:[./~]?[\w.-]+/)+[\w./-]+|[\w.-]+\.(?:py|json|ya?ml|md|txt|csv|tsv|db|sql|sh|toml|lock)")
+FLAG_TOKEN_RE = re.compile(r"(?:^|\s)-{1,2}[A-Za-z0-9][A-Za-z0-9_-]*")
+
+VERB_BUCKETS = [
+    "ls",
+    "cat",
+    "grep",
+    "rg",
+    "find",
+    "python",
+    "pytest",
+    "pip",
+    "uv",
+    "git",
+    "curl",
+    "wget",
+    "mkdir",
+    "cp",
+    "mv",
+    "rm",
+    "chmod",
+    "sed",
+    "awk",
+    "tar",
+    "make",
+    "npm",
+    "node",
+    "bash",
+    "echo",
+    "sqlite3",
+    "psql",
+    "docker",
+    "unknown",
+]
+
+SCALAR_ACTION_FEATURE_NAMES = [
+    "finish_true",
+    "has_commands",
+    "num_commands_log",
+    "command_chars_log",
+    "num_paths_log",
+    "num_flags_log",
+    "has_multiline",
+    "has_shell_control",
+    "reads_files",
+    "writes_files",
+    "runs_tests",
+    "runs_python",
+    "installs_deps",
+    "git_op",
+    "network_op",
+    "destructive_op",
+    "search_op",
+    "list_op",
+    "chmod_op",
+    "mkdir_op",
+    "archive_op",
+    "config_op",
+    "env_op",
+    "database_op",
+    "package_manager_op",
+    "has_py_path",
+    "has_json_path",
+    "has_yaml_path",
+    "has_md_path",
+    "has_test_path",
+    *[f"verb_{verb}" for verb in VERB_BUCKETS],
+]
+ACTION_FEATURE_NAMES = [
+    *SCALAR_ACTION_FEATURE_NAMES,
+    *[f"token_hash_{index:02d}" for index in range(ACTION_HASH_DIM)],
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -147,6 +223,125 @@ def action_text(action: dict[str, Any], *, max_chars: int) -> str:
     return compact(json.dumps(payload, ensure_ascii=False, sort_keys=True), max_chars=max_chars)
 
 
+def action_command_texts(action: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for command in action.get("commands") or []:
+        if isinstance(command, dict):
+            value = (
+                command.get("keystrokes")
+                or command.get("command")
+                or command.get("cmd")
+                or command.get("raw")
+                or command.get("canonical")
+            )
+        else:
+            value = command
+        if value not in (None, ""):
+            values.append(str(value))
+    return values
+
+
+def normalize_verb(token: str) -> str:
+    value = token.strip().lower().split("/")[-1]
+    if value in {"sudo", "env", "command", "timeout"}:
+        return ""
+    if value.startswith("python"):
+        return "python"
+    if value in {"py.test", "pytest"}:
+        return "pytest"
+    if value in {"pip3"}:
+        return "pip"
+    if value in {"nodejs"}:
+        return "node"
+    if value in VERB_BUCKETS:
+        return value
+    return "unknown"
+
+
+def action_verbs(command_texts: list[str]) -> set[str]:
+    verbs: set[str] = set()
+    for text in command_texts:
+        for raw_line in text.splitlines()[:40]:
+            line = raw_line.strip()
+            if not line or line.startswith(">") or line in {"EOF", "PY", "JSON"}:
+                continue
+            for segment in re.split(r"\s*(?:&&|\|\||;|\|)\s*", line)[:4]:
+                match = COMMAND_TOKEN_RE.search(segment)
+                if not match:
+                    continue
+                verb = normalize_verb(match.group(0))
+                if verb:
+                    verbs.add(verb)
+                    break
+    return verbs or {"unknown"}
+
+
+def log_feature(value: int | float, *, cap: int | float) -> float:
+    if value <= 0:
+        return 0.0
+    return min(1.0, math.log1p(float(value)) / math.log1p(float(cap)))
+
+
+def hashed_action_features(text: str) -> list[float]:
+    values = [0.0] * ACTION_HASH_DIM
+    for token in COMMAND_TOKEN_RE.findall(text.lower())[:512]:
+        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+        index = int.from_bytes(digest[:4], "little") % ACTION_HASH_DIM
+        sign = 1.0 if digest[4] & 1 else -1.0
+        values[index] += sign
+    norm = math.sqrt(sum(value * value for value in values))
+    if norm > 0:
+        values = [value / norm for value in values]
+    return values
+
+
+def extract_action_features(action: dict[str, Any], *, max_chars: int) -> list[float]:
+    command_texts = action_command_texts(action)
+    command_blob = compact("\n".join(command_texts) or action_text(action, max_chars=max_chars), max_chars=max_chars)
+    lower = command_blob.lower()
+    paths = PATH_TOKEN_RE.findall(command_blob)
+    flags = FLAG_TOKEN_RE.findall(command_blob)
+    verbs = action_verbs(command_texts or [command_blob])
+
+    scalar: dict[str, float] = {
+        "finish_true": 1.0 if action.get("task_complete") is True else 0.0,
+        "has_commands": 1.0 if command_texts else 0.0,
+        "num_commands_log": log_feature(len(command_texts), cap=8),
+        "command_chars_log": log_feature(len(command_blob), cap=max_chars),
+        "num_paths_log": log_feature(len(set(paths)), cap=32),
+        "num_flags_log": log_feature(len(flags), cap=32),
+        "has_multiline": 1.0 if "\n" in command_blob.strip() else 0.0,
+        "has_shell_control": 1.0 if re.search(r"&&|\|\||[;|<>]", command_blob) else 0.0,
+        "reads_files": 1.0 if re.search(r"\b(cat|head|tail|less|sed\s+-n|jq)\b", lower) else 0.0,
+        "writes_files": 1.0
+        if re.search(r">\s|\b(tee|touch|cat\s+>|sed\s+-i|cp|mv|mkdir|chmod|apply_patch)\b", lower)
+        else 0.0,
+        "runs_tests": 1.0 if re.search(r"\b(pytest|unittest|npm\s+test|cargo\s+test|go\s+test|make\s+test)\b", lower) else 0.0,
+        "runs_python": 1.0 if re.search(r"\bpython[0-9.]*\b", lower) else 0.0,
+        "installs_deps": 1.0 if re.search(r"\b(apt-get|apt|pip|uv|npm|pnpm|yarn)\s+(install|add|sync)\b", lower) else 0.0,
+        "git_op": 1.0 if re.search(r"\bgit\b", lower) else 0.0,
+        "network_op": 1.0 if re.search(r"\b(curl|wget|ssh|scp|http://|https://)\b", lower) else 0.0,
+        "destructive_op": 1.0 if re.search(r"\b(rm|truncate|drop|delete|reset|clean)\b", lower) else 0.0,
+        "search_op": 1.0 if re.search(r"\b(rg|grep|find|fd)\b", lower) else 0.0,
+        "list_op": 1.0 if re.search(r"\b(ls|tree|find)\b", lower) else 0.0,
+        "chmod_op": 1.0 if re.search(r"\bchmod\b", lower) else 0.0,
+        "mkdir_op": 1.0 if re.search(r"\bmkdir\b", lower) else 0.0,
+        "archive_op": 1.0 if re.search(r"\b(tar|zip|unzip|7z|gzip|gunzip)\b", lower) else 0.0,
+        "config_op": 1.0 if re.search(r"\b(config|yaml|yml|toml|json|env)\b", lower) else 0.0,
+        "env_op": 1.0 if re.search(r"\b(export|env|source|\.env)\b", lower) else 0.0,
+        "database_op": 1.0 if re.search(r"\b(sqlite3|psql|mysql|duckdb|select|insert|update)\b", lower) else 0.0,
+        "package_manager_op": 1.0 if re.search(r"\b(apt-get|pip|uv|npm|pnpm|yarn|cargo|go\s+mod)\b", lower) else 0.0,
+        "has_py_path": 1.0 if re.search(r"\.py\b|tests?/", lower) else 0.0,
+        "has_json_path": 1.0 if re.search(r"\.json\b", lower) else 0.0,
+        "has_yaml_path": 1.0 if re.search(r"\.ya?ml\b", lower) else 0.0,
+        "has_md_path": 1.0 if re.search(r"\.md\b", lower) else 0.0,
+        "has_test_path": 1.0 if re.search(r"\b(test|tests|spec)\b", lower) else 0.0,
+    }
+    for verb in VERB_BUCKETS:
+        scalar[f"verb_{verb}"] = 1.0 if verb in verbs else 0.0
+    return [scalar[name] for name in SCALAR_ACTION_FEATURE_NAMES] + hashed_action_features(command_blob)
+
+
 def serialize_state(messages: list[dict[str, Any]], *, max_chars: int) -> str:
     parts: list[str] = []
     for message in messages:
@@ -198,6 +393,7 @@ def convert_rollout(row: dict[str, Any], args: argparse.Namespace) -> tuple[list
         action_payload = action_text(action, max_chars=args.max_action_chars)
         if not action_payload.strip():
             continue
+        action_features = extract_action_features(action, max_chars=args.max_action_chars)
         records.append(
             {
                 "example_id": f"{rollout_id}:{action_number}",
@@ -221,6 +417,7 @@ def convert_rollout(row: dict[str, Any], args: argparse.Namespace) -> tuple[list
                     "commands": action.get("commands") or [],
                     "task_complete": action.get("task_complete"),
                 },
+                "action_features": action_features,
             }
         )
 
@@ -286,6 +483,8 @@ def main() -> None:
         "val_rows": len(val_rows),
         "states": len(states),
         "out_dir": str(args.out_dir),
+        "action_feature_dim": len(ACTION_FEATURE_NAMES),
+        "action_feature_names": ACTION_FEATURE_NAMES,
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps(summary, indent=2, sort_keys=True))
