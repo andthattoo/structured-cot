@@ -30,7 +30,17 @@ def parse_args() -> argparse.Namespace:
         "--reward",
         type=float,
         default=None,
-        help="Optional exact reward filter, e.g. 1.0 for successful traces.",
+        help=(
+            "Optional exact reward filter, e.g. 1.0 for successful traces. "
+            "If the dataset shard has result strings instead of reward, "
+            "success/pass/resolved values are treated as 1.0 and failure values as 0.0."
+        ),
+    )
+    parser.add_argument(
+        "--result",
+        action="append",
+        default=[],
+        help="Keep only rows whose result matches this case-insensitive value. Can repeat.",
     )
     parser.add_argument(
         "--source",
@@ -66,13 +76,38 @@ def row_value(row: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+SUCCESS_RESULTS = {"1", "1.0", "true", "success", "succeeded", "pass", "passed", "resolved", "correct"}
+FAILURE_RESULTS = {"0", "0.0", "false", "failure", "failed", "fail", "unresolved", "incorrect"}
+
+
+def row_reward(row: dict[str, Any]) -> float | None:
+    value = row.get("reward")
+    if value not in (None, ""):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+
+    result = str(row.get("result") or "").strip().lower()
+    if result in SUCCESS_RESULTS:
+        return 1.0
+    if result in FAILURE_RESULTS:
+        return 0.0
+    return None
+
+
 def row_matches(row: dict[str, Any], args: argparse.Namespace) -> bool:
     if args.reward is not None:
-        try:
-            reward = float(row.get("reward"))
-        except (TypeError, ValueError):
+        reward = row_reward(row)
+        if reward is None:
             return False
         if reward != args.reward:
+            return False
+
+    if args.result:
+        result = str(row.get("result") or "").strip().lower()
+        allowed = {item.strip().lower() for item in args.result}
+        if result not in allowed:
             return False
 
     if args.source:
