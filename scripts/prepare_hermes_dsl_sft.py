@@ -137,6 +137,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--store-original-think",
+        action="store_true",
+        help="Store original verbose think text in dsl_stats labels for bottleneck SFT.",
+    )
+    parser.add_argument(
         "--labeler",
         choices=["heuristic", "local_grammar", "openrouter"],
         default="heuristic",
@@ -772,6 +777,7 @@ def rewrite_assistant_value(
     strip_prose_before_tool: bool = True,
     labeler: DslLabeler | None = None,
     context: str = "",
+    store_original_think: bool = False,
 ) -> tuple[str, int, list[dict[str, str]]]:
     rewrites: list[dict[str, str]] = []
 
@@ -786,6 +792,9 @@ def rewrite_assistant_value(
                 prior_tool_text=prior_tool_text,
                 context=context,
             )
+        if store_original_think:
+            dsl = dict(dsl)
+            dsl["_original_think"] = think.strip()
         rewrites.append(dsl)
         return "<think>\n" + render_dsl(dsl) + "\n</think>"
 
@@ -829,6 +838,7 @@ def convert_row(
     labeler: DslLabeler | None = None,
     labeler_context_messages: int = 6,
     labeler_max_chars: int = 6000,
+    store_original_think: bool = False,
 ) -> dict[str, Any]:
     conversations = normalize_conversations(row.get("conversations", []))
     rewritten_conversations: list[dict[str, str]] = []
@@ -854,6 +864,7 @@ def convert_row(
                 strip_prose_before_tool=strip_prose_before_tool,
                 labeler=labeler,
                 context=context,
+                store_original_think=store_original_think,
             )
             new_item["value"] = new_value
             rewritten_blocks += count
@@ -927,6 +938,7 @@ def main() -> None:
                     labeler=labeler,
                     labeler_context_messages=args.labeler_context_messages,
                     labeler_max_chars=args.labeler_max_chars,
+                    store_original_think=args.store_original_think,
                 )
             except Exception:
                 if args.labeler_fallback == "skip":

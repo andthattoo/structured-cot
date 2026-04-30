@@ -294,6 +294,27 @@ uv run python scripts/prepare_hermes_dsl_sft.py \
     --out hermes_dsl_sft_local_labeled.jsonl
 ```
 
+If you want the Abstract-CoT-style bottleneck experiment, keep the original
+verbose thinking blocks as metadata during relabeling:
+
+```bash
+uv run python scripts/prepare_hermes_dsl_sft.py \
+    --dataset DJLougen/hermes-agent-traces-filtered \
+    --limit 200 \
+    --labeler local_grammar \
+    --labeler-base-url http://127.0.0.1:8002/v1 \
+    --labeler-model ggml-org/Qwen3.6-27B-GGUF \
+    --labeler-fallback heuristic \
+    --store-original-think \
+    --out hermes_dsl_sft_local_labeled_200_bottleneck.jsonl
+```
+
+That file can train a factorized bottleneck objective: one example compresses
+`context + teacher_think -> DSL`, and a second example trains
+`context + DSL -> tool_call/final`. This is not the exact Abstract-CoT paper
+attention-mask bottleneck, but it is the closest simple SFT approximation
+without custom training internals.
+
 With OpenRouter, set `OPENROUTER_API_KEY` and use a model that supports
 structured outputs. OpenRouter uses JSON Schema structured outputs here rather
 than GBNF:
@@ -329,6 +350,24 @@ script creates one example per assistant turn and masks all context tokens, so
 the loss is only on the current assistant DSL/tool-call/final-answer message.
 It trains a LoRA adapter from a Hugging Face Transformers checkpoint; GGUF files
 served by llama.cpp cannot be fine-tuned directly.
+
+For the factorized bottleneck objective, use a JSONL produced with
+`--store-original-think`:
+
+```bash
+uv run --with peft --with accelerate --with bitsandbytes \
+  python scripts/train_dsl_sft_lora.py \
+    --train-jsonl hermes_dsl_sft_local_labeled_200_bottleneck.jsonl \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --output-dir runs/dsl-bottleneck-qwen2p5-7b-lora \
+    --objective factorized_bottleneck \
+    --max-seq-len 4096 \
+    --context-messages 12 \
+    --epochs 1 \
+    --batch-size 1 \
+    --grad-accum 16 \
+    --learning-rate 2e-4
+```
 
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata

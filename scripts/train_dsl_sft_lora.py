@@ -3,13 +3,14 @@
 
 The trainer accepts the rich JSONL produced by prepare_hermes_dsl_sft.py and
 creates one training example per assistant turn. Only the current assistant
-message is trained; all prior context tokens are masked with -100.
+target span is trained; all prior context tokens are masked with -100.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-seq-len", type=int, default=4096)
     parser.add_argument("--context-messages", type=int, default=12)
     parser.add_argument("--limit-examples", type=int, default=None)
+    parser.add_argument(
+        "--objective",
+        choices=["assistant_turn", "factorized_bottleneck"],
+        default="assistant_turn",
+        help=(
+            "assistant_turn trains DSL+action as one assistant message. "
+            "factorized_bottleneck creates two examples per turn: "
+            "teacher-think -> DSL, then DSL -> action."
+        ),
+    )
     parser.add_argument("--epochs", type=float, default=1.0)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -61,6 +72,9 @@ def select_context(messages: list[dict[str, str]], assistant_index: int, context
     return system + prior_non_system[-context_messages:] + [messages[assistant_index]]
 
 
+THINK_BLOCK_RE = re.compile(r"(<think>\s*.*?\s*</think>)", re.DOTALL | re.IGNORECASE)
+
+
 def assistant_span(text: str) -> tuple[int, int]:
     marker = "<|im_start|>assistant\n"
     start = text.rfind(marker)
@@ -74,7 +88,29 @@ def assistant_span(text: str) -> tuple[int, int]:
     return content_start, end + len(end_marker)
 
 
-def load_turn_examples(path: Path, *, context_messages: int, limit_examples: int | None) -> list[dict[str, Any]]:
+def dsl_and_action(content: str) -> tuple[str, str] | None:
+    match = THINK_BLOCK_RE.search(content)
+    if not match:
+        return None
+    dsl = match.group(1).strip()
+    action = content[match.end() :].lstrip()
+    return dsl, action
+
+
+def target_span(text: str, target: str) -> tuple[int, int]:
+    start = text.rfind(target)
+    if start < 0:
+        raise ValueError("target text not found")
+    return start, start + len(target)
+
+
+def load_turn_examples(
+    path: Path,
+    *,
+    context_messages: int,
+    limit_examples: int | None,
+    objective: str,
+) -> list[dict[str, Any]]:
     examples: list[dict[str, Any]] = []
     with path.open() as f:
         for line in f:
@@ -82,16 +118,68 @@ def load_turn_examples(path: Path, *, context_messages: int, limit_examples: int
                 continue
             row = json.loads(line)
             messages = row.get("messages") or []
+            labels = row.get("dsl_stats", {}).get("labels") or []
+            label_index = 0
             for i, message in enumerate(messages):
                 if message.get("role") != "assistant":
                     continue
                 content = str(message.get("content") or "")
                 if "<think>" not in content:
                     continue
+                label = labels[label_index] if label_index < len(labels) else {}
+                label_index += 1
                 selected = select_context(messages, i, context_messages)
-                text = render_chatml(selected)
-                span = assistant_span(text)
-                examples.append({"text": text, "assistant_span": span})
+
+                if objective == "assistant_turn":
+                    text = render_chatml(selected)
+                    span = assistant_span(text)
+                    examples.append({"text": text, "target_span": span, "kind": "assistant_turn"})
+                elif objective == "factorized_bottleneck":
+                    parsed = dsl_and_action(content)
+                    original_think = str(label.get("_original_think") or "").strip()
+                    if parsed is None or not original_think:
+                        continue
+                    dsl, action = parsed
+                    context = selected[:-1]
+                    context_text = render_chatml(context)
+
+                    compression_target = dsl + "<|im_end|>"
+                    compression_text = (
+                        context_text
+                        + "<|im_start|>assistant\n"
+                        + "<teacher_think>\n"
+                        + original_think
+                        + "\n</teacher_think>\n"
+                        + compression_target
+                        + "\n"
+                    )
+                    examples.append(
+                        {
+                            "text": compression_text,
+                            "target_span": target_span(compression_text, compression_target),
+                            "kind": "compress_to_dsl",
+                        }
+                    )
+
+                    action_target = action + "<|im_end|>"
+                    action_text = (
+                        context_text
+                        + "<|im_start|>assistant\n"
+                        + dsl
+                        + "\n"
+                        + action_target
+                        + "\n"
+                    )
+                    examples.append(
+                        {
+                            "text": action_text,
+                            "target_span": target_span(action_text, action_target),
+                            "kind": "dsl_to_action",
+                        }
+                    )
+                else:
+                    raise ValueError(f"unknown objective: {objective}")
+
                 if limit_examples is not None and len(examples) >= limit_examples:
                     return examples
     return examples
@@ -109,7 +197,7 @@ class DslTurnDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         example = self.examples[idx]
         text = example["text"]
-        span_start, span_end = example["assistant_span"]
+        span_start, span_end = example["target_span"]
         encoded = self.tokenizer(
             text,
             max_length=self.max_seq_len,
@@ -203,10 +291,15 @@ def main() -> None:
         args.train_jsonl,
         context_messages=args.context_messages,
         limit_examples=args.limit_examples,
+        objective=args.objective,
     )
     if not examples:
         raise SystemExit("No assistant-turn examples found in training JSONL.")
-    print(f"Loaded {len(examples)} assistant-turn examples")
+    kind_counts: dict[str, int] = {}
+    for example in examples:
+        kind = example.get("kind", "unknown")
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    print(f"Loaded {len(examples)} examples: {kind_counts}")
 
     dataset = DslTurnDataset(examples, tokenizer, args.max_seq_len)
     training_args = TrainingArguments(
