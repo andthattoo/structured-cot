@@ -392,6 +392,52 @@ uv run --with peft --with accelerate --with bitsandbytes \
 This path defaults to `attn_implementation=eager`, because the custom 4D mask
 is more reliable there than through FlashAttention/SDPA during early tests.
 
+### AgentTrove MQE critic pilot
+
+AgentTrove Terminus-2 traces can also train a small directed-distance critic for
+offline self-distillation/ranking. First sample or stream AgentTrove rows, then
+turn each assistant command turn into `(state, action, next_state, goal,
+distance_to_goal)` tuples:
+
+```bash
+uv run --with datasets python scripts/prepare_agenttrove_mqe.py \
+  --dataset open-thoughts/AgentTrove \
+  --limit-rollouts 1000 \
+  --scan-limit 200000 \
+  --out-dir data/mqe/agenttrove_1k
+```
+
+For a fast hashing-encoder smoke train:
+
+```bash
+uv run --with torch python scripts/train_mqe_critic.py \
+  --data-dir data/mqe/agenttrove_1k \
+  --output-dir outputs/mqe/agenttrove_hash_1k \
+  --encoder-backend hashing \
+  --embedding-dim 2048 \
+  --epochs 10
+```
+
+Once the data path and ranking metrics look sane, switch to a frozen embedding
+model:
+
+```bash
+uv run --with torch --with sentence-transformers python scripts/train_mqe_critic.py \
+  --data-dir data/mqe/agenttrove_1k \
+  --output-dir outputs/mqe/agenttrove_qwen_embed_1k \
+  --encoder-backend sentence-transformers \
+  --encoder-model Qwen/Qwen3-Embedding-4B \
+  --encoder-device cuda \
+  --encoder-dtype bfloat16 \
+  --cache-path data/mqe/cache/agenttrove_1k_qwen3_embed.pt \
+  --epochs 10
+```
+
+This critic is not a verifier. It learns a progress heuristic from offline
+rollout order: real actions should reduce directed distance to the final goal
+state. Use it later to rank/filter self-distilled candidate actions alongside
+hard validity checks for DSL/action JSON.
+
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting
