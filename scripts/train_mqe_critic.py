@@ -89,10 +89,10 @@ def read_jsonl(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
 def _action_text(row: dict[str, Any]) -> str:
     action = row.get("action") or {}
     return str(
-        action.get("raw_repl_block")
-        or action.get("raw_json")
+        action.get("canonical_str")
         or action.get("raw_bash")
-        or action.get("canonical_str")
+        or action.get("raw_repl_block")
+        or action.get("raw_json")
         or ""
     )
 
