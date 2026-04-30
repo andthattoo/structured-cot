@@ -369,6 +369,29 @@ uv run --with peft --with accelerate --with bitsandbytes \
     --learning-rate 2e-4
 ```
 
+For the paper-style masked bottleneck objective, use the same JSONL but train a
+single sequence shaped as `context + teacher_think + DSL + action`. The loss is
+on `DSL + action`, while a block attention mask prevents action/final tokens
+from attending to the teacher-think span:
+
+```bash
+uv run --with peft --with accelerate --with bitsandbytes \
+  python scripts/train_dsl_sft_lora.py \
+    --train-jsonl hermes_dsl_sft_local_labeled_200_bottleneck.jsonl \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --output-dir runs/dsl-bottleneck-masked-qwen2p5-7b-lora \
+    --objective bottleneck_masked \
+    --max-seq-len 4096 \
+    --context-messages 12 \
+    --epochs 1 \
+    --batch-size 1 \
+    --grad-accum 16 \
+    --learning-rate 2e-4
+```
+
+This path defaults to `attn_implementation=eager`, because the custom 4D mask
+is more reliable there than through FlashAttention/SDPA during early tests.
+
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata
 - `summary.json` — aggregate stats, pass-set overlap, and failure accounting

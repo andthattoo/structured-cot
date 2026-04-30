@@ -28,12 +28,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-examples", type=int, default=None)
     parser.add_argument(
         "--objective",
-        choices=["assistant_turn", "factorized_bottleneck"],
+        choices=["assistant_turn", "factorized_bottleneck", "bottleneck_masked"],
         default="assistant_turn",
         help=(
             "assistant_turn trains DSL+action as one assistant message. "
             "factorized_bottleneck creates two examples per turn: "
-            "teacher-think -> DSL, then DSL -> action."
+            "teacher-think -> DSL, then DSL -> action. "
+            "bottleneck_masked trains teacher-think + DSL + action in one "
+            "sequence with action tokens masked from teacher-think attention."
         ),
     )
     parser.add_argument("--epochs", type=float, default=1.0)
@@ -52,6 +54,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-4bit", action="store_true", help="Disable 4-bit QLoRA loading.")
     parser.add_argument("--no-bf16", action="store_true", help="Disable bf16 training.")
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument(
+        "--attn-implementation",
+        default=None,
+        help=(
+            "Optional Transformers attention implementation. "
+            "For bottleneck_masked, eager is safest if SDPA/FlashAttention "
+            "rejects 4D masks."
+        ),
+    )
     parser.add_argument("--save-steps", type=int, default=100)
     parser.add_argument("--logging-steps", type=int, default=10)
     return parser.parse_args()
@@ -73,6 +84,8 @@ def select_context(messages: list[dict[str, str]], assistant_index: int, context
 
 
 THINK_BLOCK_RE = re.compile(r"(<think>\s*.*?\s*</think>)", re.DOTALL | re.IGNORECASE)
+TEACHER_START = "<teacher_think>\n"
+TEACHER_END = "\n</teacher_think>\n"
 
 
 def assistant_span(text: str) -> tuple[int, int]:
@@ -102,6 +115,49 @@ def target_span(text: str, target: str) -> tuple[int, int]:
     if start < 0:
         raise ValueError("target text not found")
     return start, start + len(target)
+
+
+def overlap_token_mask(offsets: list[tuple[int, int]], span: tuple[int, int]) -> list[bool]:
+    span_start, span_end = span
+    return [end > span_start and start < span_end for start, end in offsets]
+
+
+def make_block_causal_mask(
+    attention_mask: torch.Tensor,
+    teacher_mask: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build an additive 4D causal mask with response->teacher attention blocked.
+
+    The returned shape is (batch, 1, query_len, key_len). Values are 0 for
+    allowed attention and the dtype minimum for masked attention, matching the
+    convention used by Llama/Qwen-style Transformers models for custom 4D masks.
+    """
+
+    if attention_mask.ndim != 2:
+        raise ValueError("attention_mask must have shape (batch, seq_len)")
+    if teacher_mask.shape != attention_mask.shape:
+        raise ValueError("teacher_mask shape must match attention_mask")
+    if response_mask.shape != attention_mask.shape:
+        raise ValueError("response_mask shape must match attention_mask")
+
+    batch_size, seq_len = attention_mask.shape
+    device = attention_mask.device
+    valid = attention_mask.to(torch.bool)
+    causal = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=device))
+    allowed = causal.unsqueeze(0).expand(batch_size, -1, -1).clone()
+    allowed &= valid[:, None, :]
+    allowed &= valid[:, :, None]
+
+    block = response_mask.to(torch.bool)[:, :, None] & teacher_mask.to(torch.bool)[:, None, :]
+    allowed &= ~block
+
+    min_value = torch.finfo(dtype).min
+    additive = torch.zeros((batch_size, 1, seq_len, seq_len), dtype=dtype, device=device)
+    additive.masked_fill_(~allowed[:, None, :, :], min_value)
+    return additive
 
 
 def load_turn_examples(
@@ -177,6 +233,32 @@ def load_turn_examples(
                             "kind": "dsl_to_action",
                         }
                     )
+                elif objective == "bottleneck_masked":
+                    parsed = dsl_and_action(content)
+                    original_think = str(label.get("_original_think") or "").strip()
+                    if parsed is None or not original_think:
+                        continue
+                    dsl, action = parsed
+                    if not action:
+                        continue
+                    context = selected[:-1]
+                    context_text = render_chatml(context)
+                    prefix = context_text + "<|im_start|>assistant\n"
+                    teacher = TEACHER_START + original_think + TEACHER_END
+                    action_target = action + "<|im_end|>"
+                    text = prefix + teacher + dsl + "\n" + action_target + "\n"
+                    teacher_span = (len(prefix), len(prefix) + len(teacher))
+                    dsl_span = (teacher_span[1], teacher_span[1] + len(dsl))
+                    response_span = (dsl_span[1] + 1, dsl_span[1] + 1 + len(action_target))
+                    examples.append(
+                        {
+                            "text": text,
+                            "target_span": (dsl_span[0], response_span[1]),
+                            "teacher_span": teacher_span,
+                            "response_span": response_span,
+                            "kind": "bottleneck_masked",
+                        }
+                    )
                 else:
                     raise ValueError(f"unknown objective: {objective}")
 
@@ -214,27 +296,52 @@ class DslTurnDataset(torch.utils.data.Dataset):
                 labels.append(token_id)
             else:
                 labels.append(-100)
-        return {
+        item = {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
         }
+        if "teacher_span" in example and "response_span" in example:
+            teacher_mask = overlap_token_mask(offsets, example["teacher_span"])
+            response_mask = overlap_token_mask(offsets, example["response_span"])
+            item["teacher_mask"] = torch.tensor(teacher_mask, dtype=torch.bool)
+            item["response_mask"] = torch.tensor(response_mask, dtype=torch.bool)
+        return item
 
 
 @dataclass
 class DataCollator:
     tokenizer: Any
+    use_block_mask: bool = False
+    mask_dtype: torch.dtype = torch.float32
 
     def __call__(self, features: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         max_len = max(item["input_ids"].shape[0] for item in features)
         pad_id = self.tokenizer.pad_token_id
         batch: dict[str, list[torch.Tensor]] = {"input_ids": [], "attention_mask": [], "labels": []}
+        if self.use_block_mask:
+            batch["teacher_mask"] = []
+            batch["response_mask"] = []
         for item in features:
             pad = max_len - item["input_ids"].shape[0]
             batch["input_ids"].append(torch.nn.functional.pad(item["input_ids"], (0, pad), value=pad_id))
             batch["attention_mask"].append(torch.nn.functional.pad(item["attention_mask"], (0, pad), value=0))
             batch["labels"].append(torch.nn.functional.pad(item["labels"], (0, pad), value=-100))
-        return {key: torch.stack(value) for key, value in batch.items()}
+            if self.use_block_mask:
+                if "teacher_mask" not in item or "response_mask" not in item:
+                    raise ValueError("block mask requested but feature is missing teacher/response masks")
+                batch["teacher_mask"].append(torch.nn.functional.pad(item["teacher_mask"], (0, pad), value=False))
+                batch["response_mask"].append(torch.nn.functional.pad(item["response_mask"], (0, pad), value=False))
+
+        stacked = {key: torch.stack(value) for key, value in batch.items()}
+        if self.use_block_mask:
+            stacked["attention_mask"] = make_block_causal_mask(
+                stacked["attention_mask"],
+                stacked.pop("teacher_mask"),
+                stacked.pop("response_mask"),
+                dtype=self.mask_dtype,
+            )
+        return stacked
 
 
 def main() -> None:
@@ -265,12 +372,20 @@ def main() -> None:
             bnb_4bit_compute_dtype=torch.bfloat16 if use_bf16 else torch.float16,
         )
 
+    model_kwargs: dict[str, Any] = {}
+    attn_implementation = args.attn_implementation
+    if args.objective == "bottleneck_masked" and attn_implementation is None:
+        attn_implementation = "eager"
+    if attn_implementation is not None:
+        model_kwargs["attn_implementation"] = attn_implementation
+
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         trust_remote_code=True,
         device_map="auto",
         torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
         quantization_config=quant_config,
+        **model_kwargs,
     )
     model.config.use_cache = False
     if not args.no_4bit:
@@ -324,7 +439,11 @@ def main() -> None:
         model=model,
         args=training_args,
         train_dataset=dataset,
-        data_collator=DataCollator(tokenizer),
+        data_collator=DataCollator(
+            tokenizer,
+            use_block_mask=args.objective == "bottleneck_masked",
+            mask_dtype=torch.bfloat16 if use_bf16 else torch.float16,
+        ),
     )
     trainer.train()
     model.save_pretrained(args.output_dir)
