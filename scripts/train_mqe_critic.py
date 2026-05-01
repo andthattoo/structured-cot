@@ -297,7 +297,7 @@ def encode_unique_texts(rows: list[dict[str, Any]], config: MQETrainConfig):
             attn_implementation=config.encoder_attn_implementation,
         )
     else:
-        raise ValueError("encoder_backend must be hashing or sentence-transformers")
+        raise ValueError("encoder_backend must be hashing, sentence-transformers, or transition-cache")
 
     if cache_path:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -366,6 +366,75 @@ def build_indexed_rows(
     return indexed
 
 
+def cache_row_id(row: dict[str, Any], index: int, split: str) -> str:
+    return str(row.get("example_id") or f"{split}:{index}")
+
+
+def build_transition_cache_indexed_rows(
+    train_raw: list[dict[str, Any]],
+    val_raw: list[dict[str, Any]],
+    cache_path: Path,
+    distance_scale: float,
+):
+    import torch
+
+    cache = torch.load(cache_path, map_location="cpu")
+    if cache.get("format") != "transition-cache-v1":
+        raise ValueError(f"Unsupported transition cache format in {cache_path}")
+
+    embeddings: list[Any] = []
+
+    def build_split(rows: list[dict[str, Any]], split: str) -> list[dict[str, Any]]:
+        split_cache = cache["splits"][split]
+        by_id = {str(row_id): index for index, row_id in enumerate(split_cache["row_ids"])}
+        indexed: list[dict[str, Any]] = []
+        for row_index, row in enumerate(rows):
+            rid = cache_row_id(row, row_index, split)
+            if rid not in by_id:
+                raise KeyError(f"Transition cache missing row id {rid!r} for split {split!r}")
+            cache_index = by_id[rid]
+            base = len(embeddings)
+            embeddings.extend(
+                [
+                    split_cache["z_state"][cache_index],
+                    split_cache["z_next"][cache_index],
+                    split_cache["z_goal"][cache_index],
+                    split_cache["z_state_action"][cache_index],
+                ]
+            )
+            rollout_key = str(row.get("rollout_id"))
+            rollout_id = int(hashlib.sha256(rollout_key.encode("utf-8")).hexdigest()[:15], 16)
+            goal_ordinal = int(row.get("goal_index") or 0)
+            source_ordinal = int(round(goal_ordinal - float(row["target_distance_steps"])))
+            group_key = f"{rollout_key}:{row.get('goal_state_hash')}:{goal_ordinal}"
+            indexed.append(
+                {
+                    "state_idx": base,
+                    "next_state_idx": base + 1,
+                    "goal_idx": base + 2,
+                    "action_idx": base + 3,
+                    "group_id": int(hashlib.sha256(group_key.encode("utf-8")).hexdigest()[:15], 16),
+                    "rollout_id": rollout_id,
+                    "source_ordinal": source_ordinal,
+                    "goal_ordinal": goal_ordinal,
+                    "target": float(row["target_distance_steps"]) / distance_scale,
+                    "next_target": float(row["next_distance_steps"]) / distance_scale,
+                    "raw_target": float(row["target_distance_steps"]),
+                    "raw_next_target": float(row["next_distance_steps"]),
+                    "action_features": [],
+                    "example_id": row.get("example_id"),
+                    "challenge_id": row.get("challenge_id"),
+                }
+            )
+        return indexed
+
+    train_rows = build_split(train_raw, "train")
+    val_rows = build_split(val_raw, "val")
+    if not embeddings:
+        raise ValueError(f"No embeddings loaded from transition cache {cache_path}")
+    return train_rows, val_rows, torch.stack(embeddings).to(torch.float32), cache.get("metadata") or {}
+
+
 def action_feature_dim(rows: list[dict[str, Any]], *, enabled: bool) -> int:
     if not enabled:
         return 0
@@ -412,13 +481,19 @@ def build_model_classes():
             mrn_components: int,
             dropout: float = 0.0,
             action_feature_dim: int = 0,
+            precomputed_state_action: bool = False,
         ):
             super().__init__()
             if latent_dim % mrn_components != 0:
                 raise ValueError("latent_dim must be divisible by mrn_components")
             self.action_feature_dim = int(action_feature_dim)
+            self.precomputed_state_action = bool(precomputed_state_action)
             self.psi = make_mlp(nn, input_dim, hidden_dim, latent_dim, dropout)
-            self.phi = make_mlp(nn, input_dim * 2 + self.action_feature_dim, hidden_dim, latent_dim, dropout)
+            self.phi = (
+                None
+                if self.precomputed_state_action
+                else make_mlp(nn, input_dim * 2 + self.action_feature_dim, hidden_dim, latent_dim, dropout)
+            )
             self.mrn_components = mrn_components
             self.mrn_part_dim = latent_dim // mrn_components
 
@@ -436,6 +511,8 @@ def build_model_classes():
             return self.psi(goal)
 
         def embed_state_action(self, state, action, action_features=None):
+            if self.precomputed_state_action:
+                return self.psi(action)
             pieces = [state, action]
             if self.action_feature_dim:
                 if action_features is None:
@@ -867,21 +944,41 @@ def train_mqe(config: MQETrainConfig) -> dict[str, Any]:
     train_goal_texts = attach_goal_state_texts(train_raw, data_dir)
     val_goal_texts = attach_goal_state_texts(val_raw, data_dir)
     config = with_distance_scale(config, train_raw)
-    text_to_index, embeddings = encode_unique_texts(train_raw + val_raw, config)
-    input_dim = int(embeddings.shape[1])
-    train_rows = build_indexed_rows(train_raw, text_to_index, float(config.distance_scale), config.goal_text_mode)
-    val_rows = build_indexed_rows(val_raw, text_to_index, float(config.distance_scale), config.goal_text_mode)
-    action_dim = action_feature_dim(train_rows + val_rows, enabled=config.use_action_features)
-    pad_action_features(train_rows, action_dim)
-    pad_action_features(val_rows, action_dim)
+    transition_cache_metadata: dict[str, Any] = {}
+    precomputed_state_action = config.encoder_backend == "transition-cache"
+    if precomputed_state_action:
+        if not config.cache_path:
+            raise ValueError("--cache-path is required when --encoder-backend transition-cache")
+        train_rows, val_rows, embeddings, transition_cache_metadata = build_transition_cache_indexed_rows(
+            train_raw,
+            val_raw,
+            Path(config.cache_path),
+            float(config.distance_scale),
+        )
+        input_dim = int(embeddings.shape[1])
+        action_dim = 0
+    else:
+        text_to_index, embeddings = encode_unique_texts(train_raw + val_raw, config)
+        input_dim = int(embeddings.shape[1])
+        train_rows = build_indexed_rows(train_raw, text_to_index, float(config.distance_scale), config.goal_text_mode)
+        val_rows = build_indexed_rows(val_raw, text_to_index, float(config.distance_scale), config.goal_text_mode)
+        action_dim = action_feature_dim(train_rows + val_rows, enabled=config.use_action_features)
+        pad_action_features(train_rows, action_dim)
+        pad_action_features(val_rows, action_dim)
     multistep_terms = build_multistep_terms(train_rows, config)
     triangle_terms = build_triangle_terms(train_rows, config.triangle_max_terms, config.seed)
 
     device = resolve_device(config.device)
     model_cls = build_model_classes()
-    model = model_cls(input_dim, config.hidden_dim, config.latent_dim, config.mrn_components, config.dropout, action_dim).to(
-        device
-    )
+    model = model_cls(
+        input_dim,
+        config.hidden_dim,
+        config.latent_dim,
+        config.mrn_components,
+        config.dropout,
+        action_dim,
+        precomputed_state_action,
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     dataset = IndexedMQEDataset(train_rows)
     output_dir = Path(config.output_dir)
@@ -954,6 +1051,7 @@ def train_mqe(config: MQETrainConfig) -> dict[str, Any]:
                     "config": asdict(config),
                     "input_dim": input_dim,
                     "action_feature_dim": action_dim,
+                    "precomputed_state_action": precomputed_state_action,
                     "model_class": "DirectedQuasimetricCritic",
                     "distance_scale": config.distance_scale,
                     "best_metric": config.checkpoint_metric,
@@ -967,9 +1065,11 @@ def train_mqe(config: MQETrainConfig) -> dict[str, Any]:
         "config": asdict(config),
         "train_rows": len(train_rows),
         "val_rows": len(val_rows),
-        "unique_texts": len(text_to_index),
+        "unique_texts": 0 if precomputed_state_action else len(text_to_index),
         "input_dim": input_dim,
         "action_feature_dim": action_dim,
+        "precomputed_state_action": precomputed_state_action,
+        "transition_cache_metadata": transition_cache_metadata,
         "goal_state_texts_attached": {"train": train_goal_texts, "val": val_goal_texts},
         "multistep_terms": len(multistep_terms),
         "triangle_terms": len(triangle_terms),
@@ -983,7 +1083,11 @@ def parse_args(argv: list[str] | None = None) -> MQETrainConfig:
     parser = argparse.ArgumentParser(description="Train MQE directed-distance critic.")
     parser.add_argument("--data-dir", default=MQETrainConfig.data_dir)
     parser.add_argument("--output-dir", default=MQETrainConfig.output_dir)
-    parser.add_argument("--encoder-backend", choices=["hashing", "sentence-transformers"], default="hashing")
+    parser.add_argument(
+        "--encoder-backend",
+        choices=["hashing", "sentence-transformers", "transition-cache"],
+        default="hashing",
+    )
     parser.add_argument("--encoder-model", default="hashing")
     parser.add_argument("--embedding-dim", type=int, default=2048)
     parser.add_argument("--encoder-max-length", type=int, default=8192)
@@ -1046,6 +1150,7 @@ def main(argv: list[str] | None = None) -> int:
                 "unique_texts": summary["unique_texts"],
                 "input_dim": summary["input_dim"],
                 "action_feature_dim": summary["action_feature_dim"],
+                "precomputed_state_action": summary["precomputed_state_action"],
                 "multistep_terms": summary["multistep_terms"],
                 "triangle_terms": summary["triangle_terms"],
                 "final_metrics": summary["metrics"][-1] if summary["metrics"] else {},

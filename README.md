@@ -402,21 +402,61 @@ distance_to_goal)` tuples:
 ```bash
 uv run --with datasets python scripts/prepare_agenttrove_mqe.py \
   --dataset open-thoughts/AgentTrove \
-  --limit-rollouts 1000 \
-  --scan-limit 200000 \
-  --out-dir data/mqe/agenttrove_1k_features
+  --limit-transitions 50000 \
+  --scan-limit 1500000 \
+  --out-dir data/mqe/agenttrove_50k_features
 ```
 
 The prepared rows include `action_features`: compact verb, flag, path, mutation,
-test, network, install, and hashed argument features. Regenerate the data after
-pulling this change; old MQE dirs still train, but their feature branch is empty.
+test, network, install, and hashed argument features. They also include
+transition fields (`action_text`, `action_signature`, and deterministic hard
+negative indices) for training a goal-free transition encoder.
+
+To train the transition encoder with Qwen3-Embedding-0.6B LoRA:
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+uv run --with torch --with transformers --with peft --with accelerate python scripts/train_transition_encoder.py \
+  --data-dir data/mqe/agenttrove_50k_features \
+  --model Qwen/Qwen3-Embedding-0.6B \
+  --output-dir outputs/transition_encoder/qwen06b_agenttrove_50k_v0 \
+  --max-state-tokens 2048 \
+  --max-action-tokens 512 \
+  --lora-r 16 \
+  --lora-alpha 32 \
+  --batch-size 8 \
+  --grad-accum 4 \
+  --epochs 1 \
+  --bf16
+```
+
+Cache the trained transition embeddings:
+
+```bash
+uv run --with torch --with transformers --with peft python scripts/cache_transition_embeddings.py \
+  --data-dir data/mqe/agenttrove_50k_features \
+  --encoder-dir outputs/transition_encoder/qwen06b_agenttrove_50k_v0 \
+  --out data/mqe/cache/agenttrove_50k_qwen06b_transition.pt \
+  --dtype bfloat16
+```
+
+Then train MQE against the cached transition tensors:
+
+```bash
+uv run --with torch python scripts/train_mqe_critic.py \
+  --data-dir data/mqe/agenttrove_50k_features \
+  --encoder-backend transition-cache \
+  --cache-path data/mqe/cache/agenttrove_50k_qwen06b_transition.pt \
+  --output-dir outputs/mqe/agenttrove_50k_transition_qwen06b \
+  --epochs 10
+```
 
 For a fast hashing-encoder smoke train:
 
 ```bash
 uv run --with torch python scripts/train_mqe_critic.py \
-  --data-dir data/mqe/agenttrove_1k_features \
-  --output-dir outputs/mqe/agenttrove_hash_1k_features \
+  --data-dir data/mqe/agenttrove_50k_features \
+  --output-dir outputs/mqe/agenttrove_hash_50k_features \
   --encoder-backend hashing \
   --embedding-dim 2048 \
   --epochs 10
@@ -427,15 +467,15 @@ model:
 
 ```bash
 uv run --with torch --with sentence-transformers python scripts/train_mqe_critic.py \
-  --data-dir data/mqe/agenttrove_1k_features \
-  --output-dir outputs/mqe/agenttrove_qwen_embed_1k_features \
+  --data-dir data/mqe/agenttrove_50k_features \
+  --output-dir outputs/mqe/agenttrove_qwen_embed_50k_features \
   --encoder-backend sentence-transformers \
   --encoder-model Qwen/Qwen3-Embedding-4B \
   --encoder-device cuda \
   --encoder-dtype bfloat16 \
   --encoder-max-length 2048 \
   --embed-batch-size 8 \
-  --cache-path data/mqe/cache/agenttrove_1k_features_qwen3_embed_len2048_b8.pt \
+  --cache-path data/mqe/cache/agenttrove_50k_features_qwen3_embed_len2048_b8.pt \
   --epochs 10
 ```
 

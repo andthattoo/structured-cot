@@ -111,7 +111,8 @@ def parse_args() -> argparse.Namespace:
     source.add_argument("--dataset", default=None, help="Hugging Face dataset id to stream.")
     parser.add_argument("--split", default="train")
     parser.add_argument("--out-dir", type=Path, default=Path("data/mqe/agenttrove"))
-    parser.add_argument("--limit-rollouts", type=int, default=1000)
+    parser.add_argument("--limit-rollouts", type=int, default=None)
+    parser.add_argument("--limit-transitions", type=int, default=None)
     parser.add_argument("--scan-limit", type=int, default=200_000)
     parser.add_argument("--val-ratio", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=17)
@@ -342,6 +343,67 @@ def extract_action_features(action: dict[str, Any], *, max_chars: int) -> list[f
     return [scalar[name] for name in SCALAR_ACTION_FEATURE_NAMES] + hashed_action_features(command_blob)
 
 
+def action_feature_map(features: list[float]) -> dict[str, float]:
+    return {
+        name: float(features[index]) if index < len(features) else 0.0
+        for index, name in enumerate(ACTION_FEATURE_NAMES)
+    }
+
+
+def action_type_from_features(features: list[float]) -> str:
+    values = action_feature_map(features)
+    if values["finish_true"] > 0:
+        return "final"
+    if values["runs_tests"] > 0:
+        return "test"
+    if values["installs_deps"] > 0 or values["package_manager_op"] > 0:
+        return "install"
+    if values["git_op"] > 0:
+        return "git"
+    if values["network_op"] > 0:
+        return "network"
+    if values["database_op"] > 0:
+        return "database"
+    if values["writes_files"] > 0:
+        return "write"
+    if values["reads_files"] > 0 or values["search_op"] > 0 or values["list_op"] > 0:
+        return "read"
+    return "act"
+
+
+def short_hash(text: str, length: int = 12) -> str:
+    return stable_hash(text)[:length]
+
+
+def action_signature(action: dict[str, Any], *, max_chars: int, features: list[float]) -> tuple[str, str]:
+    command_texts = action_command_texts(action)
+    command_blob = compact("\n".join(command_texts) or action_text(action, max_chars=max_chars), max_chars=max_chars)
+    paths = sorted({path.lower() for path in PATH_TOKEN_RE.findall(command_blob)})
+    verbs = sorted(action_verbs(command_texts or [command_blob]))
+    values = action_feature_map(features)
+    action_type = action_type_from_features(features)
+    broad_flags = "".join(
+        flag
+        for flag, name in [
+            ("r", "reads_files"),
+            ("w", "writes_files"),
+            ("t", "runs_tests"),
+            ("i", "installs_deps"),
+            ("g", "git_op"),
+            ("n", "network_op"),
+            ("d", "destructive_op"),
+            ("f", "finish_true"),
+        ]
+        if values[name] > 0
+    ) or "none"
+    verb_part = ",".join(verbs)
+    path_hash = short_hash("\n".join(paths)) if paths else "none"
+    arg_hash = short_hash(command_blob.lower()) if command_blob.strip() else "none"
+    full = f"type={action_type}|verbs={verb_part}|flags={broad_flags}|paths={path_hash}|args={arg_hash}"
+    family = f"type={action_type}|verbs={verb_part}|flags={broad_flags}"
+    return full, family
+
+
 def serialize_state(messages: list[dict[str, Any]], *, max_chars: int) -> str:
     parts: list[str] = []
     for message in messages:
@@ -394,6 +456,11 @@ def convert_rollout(row: dict[str, Any], args: argparse.Namespace) -> tuple[list
         if not action_payload.strip():
             continue
         action_features = extract_action_features(action, max_chars=args.max_action_chars)
+        signature, family_signature = action_signature(
+            action,
+            max_chars=args.max_action_chars,
+            features=action_features,
+        )
         records.append(
             {
                 "example_id": f"{rollout_id}:{action_number}",
@@ -403,6 +470,10 @@ def convert_rollout(row: dict[str, Any], args: argparse.Namespace) -> tuple[list
                 "original_teacher": row_value(row, "original_teacher", "teacher", "model"),
                 "state_text": state_text,
                 "next_state_text": next_state_text,
+                "action_text": action_payload,
+                "action_signature": signature,
+                "action_family_signature": family_signature,
+                "action_type": action_type_from_features(action_features),
                 "goal_prompt": task_goal,
                 "goal_policy_text": task_goal,
                 "goal_state_hash": goal_state_hash,
@@ -433,15 +504,79 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def deterministic_pick(candidates: list[int], *, key: str, limit: int) -> list[int]:
+    unique = sorted(set(candidates))
+    if len(unique) <= limit:
+        return unique
+    rng = random.Random(int(stable_hash(key)[:15], 16))
+    return sorted(rng.sample(unique, limit))
+
+
+def add_transition_indices_and_negatives(rows: list[dict[str, Any]], *, max_negatives: int = 8) -> None:
+    by_rollout: dict[str, list[int]] = {}
+    by_family: dict[str, list[int]] = {}
+    by_source: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        row["transition_index"] = index
+        by_rollout.setdefault(str(row.get("rollout_id") or ""), []).append(index)
+        by_family.setdefault(str(row.get("action_family_signature") or ""), []).append(index)
+        source_key = "|".join(
+            [
+                str(row.get("original_source") or ""),
+                str(row.get("challenge_id") or ""),
+            ]
+        )
+        by_source.setdefault(source_key, []).append(index)
+
+    for index, row in enumerate(rows):
+        rollout = str(row.get("rollout_id") or "")
+        family = str(row.get("action_family_signature") or "")
+        source_key = "|".join(
+            [
+                str(row.get("original_source") or ""),
+                str(row.get("challenge_id") or ""),
+            ]
+        )
+        same_rollout = [candidate for candidate in by_rollout.get(rollout, []) if candidate != index]
+        same_family = [
+            candidate
+            for candidate in by_family.get(family, [])
+            if candidate != index and rows[candidate].get("action_text") != row.get("action_text")
+        ]
+        same_source = [candidate for candidate in by_source.get(source_key, []) if candidate != index]
+        negative_next = [
+            *deterministic_pick(same_rollout, key=f"{index}:next:rollout", limit=3),
+            *deterministic_pick(same_family, key=f"{index}:next:family", limit=3),
+            *deterministic_pick(same_source, key=f"{index}:next:source", limit=2),
+        ]
+        negative_action = [
+            *deterministic_pick(same_rollout, key=f"{index}:action:rollout", limit=3),
+            *deterministic_pick(same_family, key=f"{index}:action:family", limit=3),
+            *deterministic_pick(same_source, key=f"{index}:action:source", limit=2),
+        ]
+        row["negative_next_indices"] = deterministic_pick(
+            [candidate for candidate in negative_next if candidate != index],
+            key=f"{index}:next:merged",
+            limit=max_negatives,
+        )
+        row["negative_action_indices"] = deterministic_pick(
+            [candidate for candidate in negative_action if candidate != index],
+            key=f"{index}:action:merged",
+            limit=max_negatives,
+        )
+
+
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(args.seed)
+    rollout_limit = args.limit_rollouts if args.limit_rollouts is not None else (None if args.limit_transitions else 1000)
 
     rollouts: list[list[dict[str, Any]]] = []
     states: dict[str, str] = {}
     scanned = 0
     converted = 0
+    transitions = 0
 
     for row in iter_input_rows(args):
         scanned += 1
@@ -452,7 +587,10 @@ def main() -> None:
                 rollouts.append(records)
                 states.setdefault(state_record["state_hash"], state_record["serialized_state"])
                 converted += 1
-                if converted >= args.limit_rollouts:
+                transitions += len(records)
+                if rollout_limit is not None and converted >= rollout_limit:
+                    break
+                if args.limit_transitions is not None and transitions >= args.limit_transitions:
                     break
         if scanned >= args.scan_limit:
             break
@@ -463,6 +601,12 @@ def main() -> None:
     train_rollouts = rollouts[val_count:]
     train_rows = [record for rollout in train_rollouts for record in rollout]
     val_rows = [record for rollout in val_rollouts for record in rollout]
+    if args.limit_transitions is not None:
+        overflow = max(0, len(train_rows) + len(val_rows) - args.limit_transitions)
+        if overflow:
+            train_rows = train_rows[:-overflow] if overflow < len(train_rows) else []
+    add_transition_indices_and_negatives(train_rows)
+    add_transition_indices_and_negatives(val_rows)
 
     write_jsonl(args.out_dir / "train.jsonl", train_rows)
     write_jsonl(args.out_dir / "val.jsonl", val_rows)
@@ -477,10 +621,12 @@ def main() -> None:
     summary = {
         "scanned": scanned,
         "converted_rollouts": converted,
+        "limit_rollouts": rollout_limit,
         "train_rollouts": len(train_rollouts),
         "val_rollouts": len(val_rollouts),
         "train_rows": len(train_rows),
         "val_rows": len(val_rows),
+        "limit_transitions": args.limit_transitions,
         "states": len(states),
         "out_dir": str(args.out_dir),
         "action_feature_dim": len(ACTION_FEATURE_NAMES),
