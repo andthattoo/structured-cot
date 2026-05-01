@@ -97,7 +97,7 @@ def torch_dtype_from_name(dtype_name: str):
     raise ValueError("merge dtype must be one of float32, bfloat16, float16")
 
 
-def merge_transition_encoder(src: Path, dst: Path, *, dtype_name: str, device: str) -> None:
+def merge_transition_encoder(src: Path, dst: Path, *, dtype_name: str, device: str, token: str | None = None) -> None:
     try:
         from peft import PeftModel
         from transformers import AutoModel, AutoTokenizer
@@ -130,8 +130,8 @@ def merge_transition_encoder(src: Path, dst: Path, *, dtype_name: str, device: s
         ),
         flush=True,
     )
-    tokenizer = AutoTokenizer.from_pretrained(src, trust_remote_code=True)
-    base = AutoModel.from_pretrained(base_model, torch_dtype=dtype, trust_remote_code=True).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(src, trust_remote_code=True, token=token)
+    base = AutoModel.from_pretrained(base_model, torch_dtype=dtype, trust_remote_code=True, token=token).to(device)
     merged = PeftModel.from_pretrained(base, adapter_dir).merge_and_unload()
     merged.save_pretrained(dst, safe_serialization=True)
     tokenizer.save_pretrained(dst)
@@ -170,6 +170,17 @@ def transition_readme(src: Path, repo_id: str, *, merged_encoder: bool) -> str:
         "The encoder weights in this repository are already merged with the LoRA adapter."
         if merged_encoder
         else "Load the base model and apply `encoder_adapter/` with PEFT before encoding."
+    )
+    encoder_setup = (
+        "encoder = AutoModel.from_pretrained(repo_dir, trust_remote_code=True).to(device).eval()"
+        if merged_encoder
+        else "\n".join(
+            [
+                "from peft import PeftModel",
+                f'base = AutoModel.from_pretrained("{base_model}", trust_remote_code=True).to(device)',
+                'encoder = PeftModel.from_pretrained(base, Path(repo_dir) / "encoder_adapter").to(device).eval()',
+            ]
+        )
     )
 
     return f"""---
@@ -226,6 +237,100 @@ critics, not to be used as a standalone verifier.
 ## Usage
 
 {loader_note}
+
+Generic single-transition example:
+
+```python
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from huggingface_hub import snapshot_download
+from transformers import AutoModel, AutoTokenizer
+
+
+class TransitionHead(nn.Module):
+    def __init__(self, embedding_dim, action_feature_dim, hidden_dim, n_action_types):
+        super().__init__()
+        self.action_feature_dim = int(action_feature_dim)
+        self.transition = nn.Sequential(
+            nn.Linear(embedding_dim * 2 + action_feature_dim, hidden_dim),
+            nn.SiLU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, embedding_dim),
+        )
+        self.action_type_head = nn.Linear(embedding_dim, n_action_types)
+
+    def forward(self, state_z, action_z, action_features):
+        if self.action_feature_dim:
+            action_features = action_features.to(state_z.dtype)
+            inputs = torch.cat([state_z, action_z, action_features], dim=-1)
+        else:
+            inputs = torch.cat([state_z, action_z], dim=-1)
+        pred_next_z = F.normalize(self.transition(inputs), p=2, dim=-1)
+        return pred_next_z, self.action_type_head(pred_next_z)
+
+
+def encode_text(encoder, tokenizer, text, *, max_length, truncation_side, device):
+    old_side = tokenizer.truncation_side
+    tokenizer.truncation_side = truncation_side
+    try:
+        batch = tokenizer(
+            [text],
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+    finally:
+        tokenizer.truncation_side = old_side
+    batch = {{key: value.to(device) for key, value in batch.items()}}
+    with torch.no_grad():
+        output = encoder(**batch)
+    positions = torch.arange(batch["attention_mask"].shape[1], device=device).unsqueeze(0)
+    last_index = (positions * batch["attention_mask"]).argmax(dim=1)
+    pooled = output.last_hidden_state[torch.arange(1, device=device), last_index]
+    return F.normalize(pooled.float(), p=2, dim=-1)
+
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+repo_dir = snapshot_download("{repo_id}")
+
+tokenizer = AutoTokenizer.from_pretrained(repo_dir, trust_remote_code=True)
+tokenizer.padding_side = "left"
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
+{encoder_setup}
+
+head_blob = torch.load(Path(repo_dir) / "transition_head.pt", map_location="cpu")
+head = TransitionHead(
+    int(head_blob["embedding_dim"]),
+    int(head_blob["action_feature_dim"]),
+    int(head_blob["config"]["transition_hidden_dim"]),
+    len(head_blob["action_types"]),
+).to(device)
+head.load_state_dict(head_blob["transition_head_state_dict"])
+head.eval()
+
+state_text = "Current workspace state, recent logs, and relevant files."
+action_text = "Run the unit tests for the changed module."
+action_features = torch.zeros((1, int(head_blob["action_feature_dim"])), device=device)
+
+z_state = encode_text(encoder, tokenizer, state_text, max_length=1024, truncation_side="left", device=device)
+z_action = encode_text(encoder, tokenizer, action_text, max_length=512, truncation_side="right", device=device)
+with torch.no_grad():
+    z_pred_next, action_type_logits = head(z_state, z_action, action_features)
+
+print(z_pred_next.shape)
+```
+
+The zero `action_features` vector is acceptable for a minimal example. For
+ranking actions in a real harness, pass the same structured action features used
+during cache generation.
 
 This artifact is easiest to use from the `structured-cot` repository:
 
@@ -364,13 +469,14 @@ def prepare_transition(
     merge_encoder: bool,
     merge_dtype: str,
     merge_device: str,
+    token: str | None = None,
 ) -> None:
     if not (src / "transition_config.json").exists():
         raise FileNotFoundError(f"transition_config.json not found in {src}")
     if not (src / "transition_head.pt").exists():
         raise FileNotFoundError(f"transition_head.pt not found in {src}")
     if merge_encoder:
-        merge_transition_encoder(src, dst, dtype_name=merge_dtype, device=merge_device)
+        merge_transition_encoder(src, dst, dtype_name=merge_dtype, device=merge_device, token=token)
         for name in ["transition_config.json", "transition_head.pt", "metrics.json"]:
             copy_if_exists(src / name, dst / name)
     else:
@@ -387,9 +493,9 @@ def prepare_critic(src: Path, dst: Path, repo_id: str, transition_repo: str) -> 
     (dst / "README.md").write_text(critic_readme(src, repo_id, transition_repo) + "\n")
 
 
-def upload_folder(repo_id: str, folder: Path, *, private: bool, token_env: str, commit_message: str) -> None:
+def resolve_hf_token(token_env: str, *, required: bool) -> tuple[str | None, str | None]:
     try:
-        from huggingface_hub import HfApi
+        from huggingface_hub import get_token
     except ImportError as exc:
         raise SystemExit(
             "Missing dependency: huggingface_hub. Run with:\n"
@@ -397,6 +503,45 @@ def upload_folder(repo_id: str, folder: Path, *, private: bool, token_env: str, 
         ) from exc
 
     token = os.environ.get(token_env)
+    if token:
+        return token, token_env
+    token = get_token()
+    if token:
+        return token, "huggingface-cli cache"
+    if required:
+        raise SystemExit(
+            f"No Hugging Face token found. Set {token_env} or run `hf auth login` "
+            "with a token that has write access to the target repos."
+        )
+    return None, None
+
+
+def validate_hf_token(token: str) -> None:
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    try:
+        whoami = api.whoami()
+    except Exception as exc:
+        raise SystemExit(
+            "A Hugging Face token was found, but the Hub rejected it. "
+            "Run `hf auth whoami` and confirm the token has write access to the target org."
+        ) from exc
+    print(
+        json.dumps(
+            {
+                "hf_user": whoami.get("name") or whoami.get("fullname") or "unknown",
+                "phase": "hf_auth",
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
+def upload_folder(repo_id: str, folder: Path, *, private: bool, token: str, commit_message: str) -> None:
+    from huggingface_hub import HfApi
+
     api = HfApi(token=token)
     api.create_repo(repo_id=repo_id, repo_type="model", private=private, exist_ok=True)
     api.upload_folder(
@@ -404,6 +549,7 @@ def upload_folder(repo_id: str, folder: Path, *, private: bool, token_env: str, 
         repo_type="model",
         folder_path=str(folder),
         commit_message=commit_message,
+        token=token,
     )
 
 
@@ -440,6 +586,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    hf_token, token_source = resolve_hf_token(args.hf_token_env, required=not args.dry_run)
+    if token_source:
+        print(json.dumps({"hf_token_source": token_source, "phase": "hf_auth"}, sort_keys=True), flush=True)
+    if hf_token and not args.dry_run:
+        validate_hf_token(hf_token)
+
     temp_ctx = None
     if args.staging_dir is not None:
         root = args.staging_dir
@@ -462,6 +614,7 @@ def main() -> int:
                 merge_encoder=args.merge_transition_encoder,
                 merge_dtype=args.merge_dtype,
                 merge_device=args.merge_device,
+                token=hf_token,
             )
             staged.append(("transition", args.transition_repo, dst))
         if args.only in {"both", "critic"}:
@@ -495,7 +648,7 @@ def main() -> int:
                     repo,
                     folder,
                     private=args.private,
-                    token_env=args.hf_token_env,
+                    token=hf_token,
                     commit_message=args.commit_message,
                 )
     finally:
