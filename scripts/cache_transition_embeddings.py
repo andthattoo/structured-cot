@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -198,6 +199,207 @@ def cache_split(
     }
 
 
+def encode_unique_texts(
+    *,
+    label: str,
+    texts: list[str],
+    encoder,
+    tokenizer,
+    max_length: int,
+    truncation_side: str,
+    batch_size: int,
+    device: str,
+    progress_every: int,
+) -> tuple[Any, list[str]]:
+    import torch
+
+    text_to_index: dict[str, int] = {}
+    unique_texts: list[str] = []
+    indices: list[int] = []
+    for text in texts:
+        index = text_to_index.get(text)
+        if index is None:
+            index = len(unique_texts)
+            text_to_index[text] = index
+            unique_texts.append(text)
+        indices.append(index)
+
+    started = time.time()
+    print(
+        json.dumps(
+            {
+                "phase": "encode_unique",
+                "label": label,
+                "rows": len(texts),
+                "unique_texts": len(unique_texts),
+                "batch_size": batch_size,
+                "max_length": max_length,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+    parts = []
+    total_batches = (len(unique_texts) + batch_size - 1) // batch_size
+    with torch.no_grad():
+        for batch_no, start in enumerate(range(0, len(unique_texts), batch_size), start=1):
+            batch_texts = unique_texts[start : start + batch_size]
+            encoded = encode_texts(
+                encoder,
+                tokenizer,
+                batch_texts,
+                max_length=max_length,
+                device=device,
+                truncation_side=truncation_side,
+            )
+            parts.append(encoded.cpu())
+            if progress_every > 0 and (batch_no == 1 or batch_no % progress_every == 0 or batch_no == total_batches):
+                elapsed = max(1e-6, time.time() - started)
+                done = min(start + batch_size, len(unique_texts))
+                print(
+                    json.dumps(
+                        {
+                            "phase": "encode_unique_progress",
+                            "label": label,
+                            "batch": batch_no,
+                            "batches": total_batches,
+                            "done_unique": done,
+                            "unique_texts": len(unique_texts),
+                            "unique_per_sec": round(done / elapsed, 3),
+                            "elapsed_sec": round(elapsed, 1),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+
+    if not parts:
+        return torch.empty((0, 0)), []
+    unique_tensor = torch.cat(parts, dim=0)
+    index_tensor = torch.tensor(indices, dtype=torch.long)
+    return unique_tensor[index_tensor], [stable_hash(text) for text in texts]
+
+
+def cache_split_deduped(
+    *,
+    split: str,
+    rows: list[dict[str, Any]],
+    states: dict[str, str],
+    encoder,
+    tokenizer,
+    head,
+    feature_dim: int,
+    max_state_tokens: int,
+    max_action_tokens: int,
+    batch_size: int,
+    head_batch_size: int,
+    device: str,
+    progress_every: int,
+) -> dict[str, Any]:
+    import torch
+
+    print(
+        json.dumps(
+            {
+                "phase": "cache_split",
+                "split": split,
+                "rows": len(rows),
+                "feature_dim": feature_dim,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    row_ids = [row_id(row, index, split) for index, row in enumerate(rows)]
+    state_texts = [str(row.get("state_text") or "") for row in rows]
+    action_texts = [action_text(row) for row in rows]
+    next_state_texts = [str(row.get("next_state_text") or "") for row in rows]
+    goal_texts = [goal_text(row, states) for row in rows]
+
+    state_like_texts = state_texts + next_state_texts + goal_texts
+    z_state_like, state_like_hashes = encode_unique_texts(
+        label=f"{split}:state_next_goal",
+        texts=state_like_texts,
+        encoder=encoder,
+        tokenizer=tokenizer,
+        max_length=max_state_tokens,
+        truncation_side="left",
+        batch_size=batch_size,
+        device=device,
+        progress_every=progress_every,
+    )
+    row_count = len(rows)
+    z_state = z_state_like[:row_count]
+    z_next = z_state_like[row_count : 2 * row_count]
+    z_goal = z_state_like[2 * row_count :]
+    state_hashes = state_like_hashes[:row_count]
+    next_hashes = state_like_hashes[row_count : 2 * row_count]
+    goal_hashes = state_like_hashes[2 * row_count :]
+    z_action, action_hashes = encode_unique_texts(
+        label=f"{split}:action",
+        texts=action_texts,
+        encoder=encoder,
+        tokenizer=tokenizer,
+        max_length=max_action_tokens,
+        truncation_side="right",
+        batch_size=batch_size,
+        device=device,
+        progress_every=progress_every,
+    )
+
+    features = torch.tensor(
+        [pad_features(action_features(row), feature_dim) for row in rows],
+        dtype=torch.float32,
+    )
+    state_action_parts = []
+    started = time.time()
+    total_batches = (len(rows) + head_batch_size - 1) // head_batch_size
+    with torch.no_grad():
+        for batch_no, start in enumerate(range(0, len(rows), head_batch_size), start=1):
+            end = min(start + head_batch_size, len(rows))
+            pred, _ = head(
+                z_state[start:end].to(device),
+                z_action[start:end].to(device),
+                features[start:end].to(device),
+            )
+            state_action_parts.append(pred.cpu())
+            if progress_every > 0 and (batch_no == 1 or batch_no % progress_every == 0 or batch_no == total_batches):
+                elapsed = max(1e-6, time.time() - started)
+                print(
+                    json.dumps(
+                        {
+                            "phase": "transition_head_progress",
+                            "split": split,
+                            "batch": batch_no,
+                            "batches": total_batches,
+                            "done_rows": end,
+                            "rows": len(rows),
+                            "rows_per_sec": round(end / elapsed, 3),
+                            "elapsed_sec": round(elapsed, 1),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+
+    return {
+        "row_ids": row_ids,
+        "z_state": z_state,
+        "z_action": z_action,
+        "z_next": z_next,
+        "z_goal": z_goal,
+        "z_state_action": torch.cat(state_action_parts, dim=0) if state_action_parts else torch.empty((0, 0)),
+        "action_features": features,
+        "text_hashes": {
+            "state": state_hashes,
+            "action": action_hashes,
+            "next_state": next_hashes,
+            "goal": goal_hashes,
+        },
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cache transition encoder embeddings for MQE.")
     parser.add_argument("--data-dir", type=Path, required=True)
@@ -206,6 +408,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-state-tokens", type=int, default=None)
     parser.add_argument("--max-action-tokens", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--head-batch-size", type=int, default=512)
+    parser.add_argument("--progress-every", type=int, default=25)
+    parser.add_argument("--no-dedupe", action="store_true")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", choices=["float32", "bfloat16", "float16"], default="float32")
     parser.add_argument("--max-train-rows", type=int, default=None)
@@ -224,31 +429,40 @@ def main() -> int:
     max_state_tokens = args.max_state_tokens or int(train_config["max_state_tokens"])
     max_action_tokens = args.max_action_tokens or int(train_config["max_action_tokens"])
     states = load_states(args.data_dir)
-    train_cache = cache_split(
+    cache_fn = cache_split if args.no_dedupe else cache_split_deduped
+    cache_kwargs = {
+        "states": states,
+        "encoder": encoder,
+        "tokenizer": tokenizer,
+        "head": head,
+        "feature_dim": feature_dim,
+        "max_state_tokens": max_state_tokens,
+        "max_action_tokens": max_action_tokens,
+        "batch_size": args.batch_size,
+        "device": device,
+    }
+    if args.no_dedupe:
+        print(
+            json.dumps({"phase": "cache_mode", "mode": "legacy_no_dedupe"}, sort_keys=True),
+            flush=True,
+        )
+    else:
+        cache_kwargs["head_batch_size"] = args.head_batch_size
+        cache_kwargs["progress_every"] = args.progress_every
+        print(
+            json.dumps({"phase": "cache_mode", "mode": "dedupe"}, sort_keys=True),
+            flush=True,
+        )
+
+    train_cache = cache_fn(
         split="train",
         rows=train_rows,
-        states=states,
-        encoder=encoder,
-        tokenizer=tokenizer,
-        head=head,
-        feature_dim=feature_dim,
-        max_state_tokens=max_state_tokens,
-        max_action_tokens=max_action_tokens,
-        batch_size=args.batch_size,
-        device=device,
+        **cache_kwargs,
     )
-    val_cache = cache_split(
+    val_cache = cache_fn(
         split="val",
         rows=val_rows,
-        states=states,
-        encoder=encoder,
-        tokenizer=tokenizer,
-        head=head,
-        feature_dim=feature_dim,
-        max_state_tokens=max_state_tokens,
-        max_action_tokens=max_action_tokens,
-        batch_size=args.batch_size,
-        device=device,
+        **cache_kwargs,
     )
     payload = {
         "format": "transition-cache-v1",
