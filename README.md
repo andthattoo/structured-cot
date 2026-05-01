@@ -268,6 +268,33 @@ NEXT: tool_call
 </tool_call>
 ```
 
+For Qwen3.6, prefer the model-native XML tool-call target instead of the
+Hermes JSON target:
+
+```bash
+uv run python scripts/prepare_hermes_dsl_sft.py \
+    --dataset DJLougen/hermes-agent-traces-filtered \
+    --limit 200 \
+    --labeler local_grammar \
+    --labeler-base-url http://127.0.0.1:8002/v1 \
+    --labeler-model ggml-org/Qwen3.6-27B-GGUF \
+    --store-original-think \
+    --tool-format qwen_xml \
+    --out hermes_dsl_sft_qwenxml_200_bottleneck.jsonl
+```
+
+This rewrites assistant tool calls to:
+
+```text
+<tool_call>
+<function=run_shell>
+<parameter=command>
+printf 'Hello, world!\n' > hello.txt
+</parameter>
+</function>
+</tool_call>
+```
+
 By default, natural-language prose between `</think>` and `<tool_call>` is
 stripped so the SFT target teaches abstract reasoning followed directly by tool
 calls. Pass `--keep-pre-tool-prose` if you want to preserve the original

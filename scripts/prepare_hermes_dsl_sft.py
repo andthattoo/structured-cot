@@ -21,6 +21,7 @@ state label for the next assistant action.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -42,6 +43,16 @@ DSL_SYSTEM_PROMPT = (
     "NEXT: tool_call or final\n"
     "Use the DSL as a decision record for the next action, then emit the "
     "tool call or final answer normally."
+)
+QWEN_XML_TOOL_PROMPT = (
+    "When calling tools, use Qwen XML tool-call format exactly:\n"
+    "<tool_call>\n"
+    "<function=tool_name>\n"
+    "<parameter=parameter_name>\n"
+    "parameter value\n"
+    "</parameter>\n"
+    "</function>\n"
+    "</tool_call>"
 )
 
 DSL_PLANS = [
@@ -140,6 +151,16 @@ def parse_args() -> argparse.Namespace:
         "--store-original-think",
         action="store_true",
         help="Store original verbose think text in dsl_stats labels for bottleneck SFT.",
+    )
+    parser.add_argument(
+        "--tool-format",
+        choices=["hermes_json", "qwen_xml"],
+        default="hermes_json",
+        help=(
+            "Assistant tool-call target format. hermes_json preserves the "
+            "source <tool_call>{...}</tool_call> JSON. qwen_xml rewrites "
+            "tool calls to Qwen3.6 native <function=...><parameter=...> XML."
+        ),
     )
     parser.add_argument(
         "--labeler",
@@ -256,6 +277,74 @@ def has_any(text: str, words: Iterable[str]) -> bool:
 
 def has_tool_call(assistant_text: str) -> bool:
     return TOOL_CALL_RE.search(assistant_text) is not None
+
+
+def parse_tool_call_payload(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        try:
+            payload = ast.literal_eval(stripped)
+        except (ValueError, SyntaxError):
+            return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def tool_call_name_and_args(payload: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    function = payload.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        args = function.get("arguments", {})
+    else:
+        name = payload.get("name") or payload.get("tool")
+        args = payload.get("arguments", {})
+
+    if isinstance(args, str):
+        parsed_args = parse_json_maybe(args)
+        args = parsed_args if isinstance(parsed_args, dict) else {"value": args}
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        args = {"value": args}
+
+    if not name:
+        return None
+    return str(name), dict(args)
+
+
+def render_qwen_xml_tool_call(name: str, args: dict[str, Any]) -> str:
+    lines = ["<tool_call>", f"<function={name}>"]
+    for key, value in args.items():
+        if isinstance(value, str):
+            rendered = value
+        else:
+            rendered = json.dumps(value, ensure_ascii=False)
+        lines.extend([f"<parameter={key}>", rendered, "</parameter>"])
+    lines.extend(["</function>", "</tool_call>"])
+    return "\n".join(lines)
+
+
+def convert_tool_calls_to_qwen_xml(value: str) -> tuple[str, int]:
+    converted = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal converted
+        payload = parse_tool_call_payload(match.group(1))
+        if payload is None:
+            return match.group(0)
+        parsed = tool_call_name_and_args(payload)
+        if parsed is None:
+            return match.group(0)
+        name, args = parsed
+        converted += 1
+        return render_qwen_xml_tool_call(name, args)
+
+    return TOOL_CALL_RE.sub(replace, value), converted
 
 
 def mark_source(
@@ -804,12 +893,15 @@ def rewrite_assistant_value(
     return rewritten, count, rewrites
 
 
-def append_dsl_system_prompt(conversations: list[dict[str, str]]) -> None:
+def append_dsl_system_prompt(conversations: list[dict[str, str]], *, tool_format: str) -> None:
+    prompt = DSL_SYSTEM_PROMPT
+    if tool_format == "qwen_xml":
+        prompt = prompt + "\n\n" + QWEN_XML_TOOL_PROMPT
     for item in conversations:
         if ROLE_MAP.get(item["from"], item["from"]) == "system":
-            item["value"] = item["value"].rstrip() + "\n\n" + DSL_SYSTEM_PROMPT
+            item["value"] = item["value"].rstrip() + "\n\n" + prompt
             return
-    conversations.insert(0, {"from": "system", "value": DSL_SYSTEM_PROMPT})
+    conversations.insert(0, {"from": "system", "value": prompt})
 
 
 def to_messages(conversations: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -839,11 +931,13 @@ def convert_row(
     labeler_context_messages: int = 6,
     labeler_max_chars: int = 6000,
     store_original_think: bool = False,
+    tool_format: str = "hermes_json",
 ) -> dict[str, Any]:
     conversations = normalize_conversations(row.get("conversations", []))
     rewritten_conversations: list[dict[str, str]] = []
     rewritten_blocks = 0
     tool_turns = 0
+    converted_tool_calls = 0
     labels: list[dict[str, str]] = []
     prior_tool_text = ""
     history: list[dict[str, str]] = []
@@ -870,6 +964,11 @@ def convert_row(
             rewritten_blocks += count
             labels.extend(row_labels)
             if has_tool_call(new_value):
+                if tool_format == "qwen_xml":
+                    new_item["value"], converted = convert_tool_calls_to_qwen_xml(
+                        new_item["value"]
+                    )
+                    converted_tool_calls += converted
                 tool_turns += 1
         elif role == "tool":
             prior_tool_text = new_item["value"]
@@ -879,7 +978,7 @@ def convert_row(
         history.append(new_item)
 
     if add_system_prompt:
-        append_dsl_system_prompt(rewritten_conversations)
+        append_dsl_system_prompt(rewritten_conversations, tool_format=tool_format)
 
     messages = to_messages(rewritten_conversations)
     out = {
@@ -893,6 +992,8 @@ def convert_row(
         "dsl_stats": {
             "rewritten_think_blocks": rewritten_blocks,
             "assistant_tool_turns": tool_turns,
+            "converted_tool_calls": converted_tool_calls,
+            "tool_format": tool_format,
             "labels": labels,
         },
     }
@@ -939,6 +1040,7 @@ def main() -> None:
                     labeler_context_messages=args.labeler_context_messages,
                     labeler_max_chars=args.labeler_max_chars,
                     store_original_think=args.store_original_think,
+                    tool_format=args.tool_format,
                 )
             except Exception:
                 if args.labeler_fallback == "skip":
@@ -963,6 +1065,7 @@ def main() -> None:
                 "rows_skipped": skipped,
                 "rewritten_think_blocks": rewritten_total,
                 "labeler": args.labeler,
+                "tool_format": args.tool_format,
                 "label_source_counts": label_source_counts,
                 "out": str(args.out),
             },
