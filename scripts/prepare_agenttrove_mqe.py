@@ -352,8 +352,6 @@ def action_feature_map(features: list[float]) -> dict[str, float]:
 
 def action_type_from_features(features: list[float]) -> str:
     values = action_feature_map(features)
-    if values["finish_true"] > 0:
-        return "final"
     if values["runs_tests"] > 0:
         return "test"
     if values["installs_deps"] > 0 or values["package_manager_op"] > 0:
@@ -368,6 +366,8 @@ def action_type_from_features(features: list[float]) -> str:
         return "write"
     if values["reads_files"] > 0 or values["search_op"] > 0 or values["list_op"] > 0:
         return "read"
+    if values["finish_true"] > 0:
+        return "final"
     return "act"
 
 

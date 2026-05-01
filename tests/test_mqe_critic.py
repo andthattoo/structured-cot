@@ -69,6 +69,20 @@ def test_prepare_extracts_structured_action_features():
     assert features[names.index("verb_curl")] == 1.0
 
 
+def test_action_type_prefers_programmatic_effect_over_task_complete():
+    command_action = {
+        "commands": [{"keystrokes": "cat > main.py <<'PY'\nprint('ok')\nPY\n"}],
+        "task_complete": True,
+    }
+    finish_only_action = {"task_complete": True}
+
+    command_features = prepare.extract_action_features(command_action, max_chars=4000)
+    finish_features = prepare.extract_action_features(finish_only_action, max_chars=4000)
+
+    assert prepare.action_type_from_features(command_features) == "write"
+    assert prepare.action_type_from_features(finish_features) == "final"
+
+
 def test_prepare_adds_transition_schema_and_hard_negatives():
     args = type(
         "Args",
