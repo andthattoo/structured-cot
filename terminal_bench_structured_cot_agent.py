@@ -9,12 +9,15 @@ llama.cpp's normal lazy tool grammar parse shell tool calls.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
+import shlex
 import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -465,6 +468,20 @@ class StructuredCotTerminalAgent(BaseAgent):
         message = (completed.stderr or completed.stdout or "").strip()
         return message or f"bash -n exited with status {completed.returncode}"
 
+    def _tmux_safe_command(self, command: str) -> str:
+        """Encode multiline commands so tmux's wait marker cannot corrupt them."""
+        command = command.replace("\r\n", "\n").replace("\r", "\n")
+        if "\n" not in command:
+            return command
+
+        encoded = base64.b64encode(command.encode("utf-8")).decode("ascii")
+        script_path = f"/tmp/structured_cot_cmd_{uuid.uuid4().hex}.sh"
+        quoted_path = shlex.quote(script_path)
+        return (
+            f"printf %s {shlex.quote(encoded)} | base64 -d > {quoted_path}; "
+            f"bash {quoted_path}; rc=$?; rm -f {quoted_path}; test $rc -eq 0"
+        )
+
     def _run_shell(
         self,
         session: TmuxSession,
@@ -483,8 +500,9 @@ class StructuredCotTerminalAgent(BaseAgent):
             }
 
         try:
+            tmux_command = self._tmux_safe_command(command)
             session.send_keys(
-                [command, "Enter"],
+                [tmux_command, "Enter"],
                 block=True,
                 max_timeout_sec=max_timeout_sec,
             )
