@@ -53,6 +53,7 @@ class TransitionTrainConfig:
     device: str = "auto"
     max_train_rows: int | None = None
     max_val_rows: int | None = None
+    max_steps: int | None = None
     log_every: int = 10
 
 
@@ -467,6 +468,7 @@ def train_transition_encoder(config: TransitionTrainConfig) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics: list[dict[str, Any]] = []
     global_step = 0
+    stop_training = False
 
     for epoch in range(1, config.epochs + 1):
         encoder.train()
@@ -474,6 +476,9 @@ def train_transition_encoder(config: TransitionTrainConfig) -> dict[str, Any]:
         running: dict[str, list[float]] = {}
         optimizer.zero_grad(set_to_none=True)
         for step, batch in enumerate(loader, start=1):
+            if config.max_steps is not None and global_step >= config.max_steps:
+                stop_training = True
+                break
             state_z = encode_texts(
                 encoder,
                 tokenizer,
@@ -588,6 +593,9 @@ def train_transition_encoder(config: TransitionTrainConfig) -> dict[str, Any]:
                 running.setdefault(name, []).append(value)
             if config.log_every > 0 and global_step % config.log_every == 0:
                 print(json.dumps({"epoch": epoch, "step": global_step, **{k: sum(v) / len(v) for k, v in running.items()}}, sort_keys=True))
+            if config.max_steps is not None and global_step >= config.max_steps:
+                stop_training = True
+                break
 
         val_metrics = evaluate(encoder, tokenizer, head, val_rows, config, feature_dim, device)
         row = {
@@ -598,6 +606,8 @@ def train_transition_encoder(config: TransitionTrainConfig) -> dict[str, Any]:
         }
         metrics.append(row)
         print(json.dumps(row, sort_keys=True))
+        if stop_training:
+            break
 
     tokenizer.save_pretrained(output_dir)
     adapter_dir = output_dir / "encoder_adapter"
@@ -672,6 +682,7 @@ def parse_args(argv: list[str] | None = None) -> TransitionTrainConfig:
     parser.add_argument("--device", default=TransitionTrainConfig.device)
     parser.add_argument("--max-train-rows", type=int, default=None)
     parser.add_argument("--max-val-rows", type=int, default=None)
+    parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--log-every", type=int, default=TransitionTrainConfig.log_every)
     return TransitionTrainConfig(**vars(parser.parse_args(argv)))
 
