@@ -257,6 +257,7 @@ def encode_unique_texts(
     device: str,
     progress_every: int,
     sort_by_length: bool,
+    max_batch_chars: int | None,
 ) -> tuple[Any, list[str]]:
     import torch
 
@@ -288,15 +289,40 @@ def encode_unique_texts(
     )
 
     encode_order = list(range(len(unique_texts)))
+    text_lengths = [len(text) for text in unique_texts]
     if sort_by_length:
-        encode_order.sort(key=lambda index: len(unique_texts[index]), reverse=True)
+        encode_order.sort(key=lambda index: text_lengths[index], reverse=True)
+
+    batches: list[list[int]] = []
+    if max_batch_chars is not None and max_batch_chars > 0:
+        current: list[int] = []
+        current_max = 0
+        for index in encode_order:
+            length = text_lengths[index]
+            candidate_max = max(current_max, length)
+            candidate_size = len(current) + 1
+            if current and candidate_max * candidate_size > max_batch_chars:
+                batches.append(current)
+                current = [index]
+                current_max = length
+            else:
+                current.append(index)
+                current_max = candidate_max
+            if len(current) >= batch_size:
+                batches.append(current)
+                current = []
+                current_max = 0
+        if current:
+            batches.append(current)
+    else:
+        batches = [encode_order[start : start + batch_size] for start in range(0, len(encode_order), batch_size)]
 
     parts = []
     encoded_indices: list[int] = []
-    total_batches = (len(unique_texts) + batch_size - 1) // batch_size
+    total_batches = len(batches)
+    done_count = 0
     with torch.inference_mode():
-        for batch_no, start in enumerate(range(0, len(encode_order), batch_size), start=1):
-            batch_indices = encode_order[start : start + batch_size]
+        for batch_no, batch_indices in enumerate(batches, start=1):
             batch_texts = [unique_texts[index] for index in batch_indices]
             encoded = encode_texts(
                 encoder,
@@ -308,9 +334,9 @@ def encode_unique_texts(
             )
             parts.append(encoded.cpu())
             encoded_indices.extend(batch_indices)
+            done_count += len(batch_indices)
             if progress_every > 0 and (batch_no == 1 or batch_no % progress_every == 0 or batch_no == total_batches):
                 elapsed = max(1e-6, time.time() - started)
-                done = min(start + batch_size, len(unique_texts))
                 print(
                     json.dumps(
                         {
@@ -318,9 +344,10 @@ def encode_unique_texts(
                             "label": label,
                             "batch": batch_no,
                             "batches": total_batches,
-                            "done_unique": done,
+                            "batch_size": len(batch_indices),
+                            "done_unique": done_count,
                             "unique_texts": len(unique_texts),
-                            "unique_per_sec": round(done / elapsed, 3),
+                            "unique_per_sec": round(done_count / elapsed, 3),
                             "elapsed_sec": round(elapsed, 1),
                         },
                         sort_keys=True,
@@ -356,6 +383,7 @@ def cache_split_deduped(
     device: str,
     progress_every: int,
     sort_by_length: bool,
+    max_batch_chars: int | None,
 ) -> dict[str, Any]:
     import torch
 
@@ -389,6 +417,7 @@ def cache_split_deduped(
         device=device,
         progress_every=progress_every,
         sort_by_length=sort_by_length,
+        max_batch_chars=max_batch_chars,
     )
     row_count = len(rows)
     z_state = z_state_like[:row_count]
@@ -408,6 +437,7 @@ def cache_split_deduped(
         device=device,
         progress_every=progress_every,
         sort_by_length=sort_by_length,
+        max_batch_chars=max_batch_chars,
     )
 
     features = torch.tensor(
@@ -477,6 +507,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=["float32", "bfloat16", "float16"], default="float32")
     parser.add_argument("--attn-implementation", default=None)
     parser.add_argument("--sort-by-length", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--max-batch-chars",
+        type=int,
+        default=None,
+        help=(
+            "Approximate dynamic batch budget for unique text encoding. "
+            "Keeps long sorted batches smaller while allowing short batches up to --batch-size."
+        ),
+    )
     parser.add_argument("--max-train-rows", type=int, default=None)
     parser.add_argument("--max-val-rows", type=int, default=None)
     return parser.parse_args()
@@ -519,12 +558,14 @@ def main() -> int:
         cache_kwargs["head_batch_size"] = args.head_batch_size
         cache_kwargs["progress_every"] = args.progress_every
         cache_kwargs["sort_by_length"] = args.sort_by_length
+        cache_kwargs["max_batch_chars"] = args.max_batch_chars
         print(
             json.dumps(
                 {
                     "phase": "cache_mode",
                     "mode": "dedupe",
                     "sort_by_length": args.sort_by_length,
+                    "max_batch_chars": args.max_batch_chars,
                 },
                 sort_keys=True,
             ),
