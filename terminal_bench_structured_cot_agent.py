@@ -68,7 +68,22 @@ DSL_REASONING_RE = re.compile(
 )
 
 
-TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+TOOL_CALL_BLOCK_RE = re.compile(
+    r"<tool_call>\s*(.*?)(?:\s*</tool_call>|\s*\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+TOOL_NAME_RE = re.compile(
+    r'"name"\s*:\s*"(?P<json_name>[A-Za-z_][\w-]*)"|'
+    r'"function=(?P<quoted_function>[A-Za-z_][\w-]*)"|'
+    r"function\s*=\s*(?P<bare_function>[A-Za-z_][\w-]*)|"
+    r"<function\s*=\s*(?P<tag_function>[A-Za-z_][\w-]*)",
+    re.IGNORECASE,
+)
+TOOL_VALUE_RE = re.compile(
+    r'"(?P<key>command|cmd|keystrokes|summary|final_answer)"\s*:\s*'
+    r'(?P<value>"(?:\\.|[^"\\])*"|.*?)(?=,\s*"[A-Za-z_][\w-]*"\s*:|\}\s*\}?|</(?:parameter|function|tool_call)>|\Z)',
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 RUN_SHELL_TOOL = {
@@ -280,6 +295,49 @@ class StructuredCotTerminalAgent(BaseAgent):
                 return dict(loaded)
         return {}
 
+    def _decode_tool_value(self, value: str) -> str:
+        value = value.strip()
+        if value.startswith('"'):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                decoded = value.strip('"')
+            return str(decoded).strip()
+        value = re.split(r"</(?:parameter|function|tool_call)>", value, maxsplit=1, flags=re.IGNORECASE)[0]
+        return value.strip().strip('"').strip()
+
+    def _recover_malformed_tool_call(self, text: str, index: int) -> dict[str, Any] | None:
+        name = ""
+        name_match = TOOL_NAME_RE.search(text)
+        if name_match:
+            name = next(group for group in name_match.groups() if group)
+        lowered = text.lower()
+        if not name:
+            if "task_complete" in lowered or "finish" in lowered:
+                name = "finish"
+            elif "run_shell" in lowered or '"command"' in lowered or '"keystrokes"' in lowered:
+                name = "run_shell"
+
+        values: dict[str, str] = {}
+        for match in TOOL_VALUE_RE.finditer(text):
+            values[match.group("key").lower()] = self._decode_tool_value(match.group("value"))
+
+        if name == "run_shell":
+            command = values.get("command") or values.get("cmd") or values.get("keystrokes")
+            if not command:
+                return None
+            return self._normalize_tool_call(
+                {"name": "run_shell", "arguments": {"command": command}},
+                index,
+            )
+        if name == "finish":
+            summary = values.get("summary") or values.get("final_answer") or "Task complete."
+            return self._normalize_tool_call(
+                {"name": "finish", "arguments": {"summary": summary}},
+                index,
+            )
+        return None
+
     def _normalize_tool_call(self, raw: dict[str, Any], index: int) -> dict[str, Any] | None:
         function = raw.get("function") if isinstance(raw.get("function"), dict) else None
         name = str(raw.get("name") or raw.get("tool") or (function or {}).get("name") or "")
@@ -333,9 +391,13 @@ class StructuredCotTerminalAgent(BaseAgent):
         tool_calls: list[dict[str, Any]] = []
 
         for match in TOOL_CALL_BLOCK_RE.finditer(content):
+            raw_text = match.group(1).strip()
             try:
-                raw = json.loads(match.group(1).strip())
+                raw = json.loads(raw_text)
             except json.JSONDecodeError:
+                call = self._recover_malformed_tool_call(raw_text, len(tool_calls))
+                if call is not None:
+                    tool_calls.append(call)
                 continue
             if isinstance(raw, dict):
                 call = self._normalize_tool_call(raw, len(tool_calls))
