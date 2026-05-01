@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -82,6 +83,11 @@ TOOL_NAME_RE = re.compile(
 TOOL_VALUE_RE = re.compile(
     r'"(?P<key>command|cmd|keystrokes|summary|final_answer)"\s*:\s*'
     r'(?P<value>"(?:\\.|[^"\\])*"|.*?)(?=,\s*"[A-Za-z_][\w-]*"\s*:|\}\s*\}?|</(?:parameter|function|tool_call)>|\Z)',
+    re.DOTALL | re.IGNORECASE,
+)
+XML_PARAMETER_RE = re.compile(
+    r"<parameter\s*=\s*\"?(?P<key>command|cmd|keystrokes|summary|final_answer)\"?\s*>\s*"
+    r"(?P<value>.*?)(?:\s*</parameter>|\s*</function>|\s*</tool_call>|\s*\Z)",
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -321,6 +327,8 @@ class StructuredCotTerminalAgent(BaseAgent):
         values: dict[str, str] = {}
         for match in TOOL_VALUE_RE.finditer(text):
             values[match.group("key").lower()] = self._decode_tool_value(match.group("value"))
+        for match in XML_PARAMETER_RE.finditer(text):
+            values[match.group("key").lower()] = self._decode_tool_value(match.group("value"))
 
         if name == "run_shell":
             command = values.get("command") or values.get("cmd") or values.get("keystrokes")
@@ -438,6 +446,25 @@ class StructuredCotTerminalAgent(BaseAgent):
             return content, []
         return "", [call]
 
+    def _shell_syntax_error(self, command: str) -> str | None:
+        try:
+            completed = subprocess.run(
+                ["bash", "-n", "-c", command],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except FileNotFoundError:
+            return None
+        except subprocess.TimeoutExpired:
+            return "shell syntax preflight timed out"
+
+        if completed.returncode == 0:
+            return None
+        message = (completed.stderr or completed.stdout or "").strip()
+        return message or f"bash -n exited with status {completed.returncode}"
+
     def _run_shell(
         self,
         session: TmuxSession,
@@ -445,6 +472,16 @@ class StructuredCotTerminalAgent(BaseAgent):
         max_timeout_sec: float,
     ) -> dict[str, Any]:
         started = time.time()
+        syntax_error = self._shell_syntax_error(command)
+        if syntax_error is not None:
+            return {
+                "status": "error",
+                "elapsed_sec": round(time.time() - started, 3),
+                "command": command,
+                "error": f"shell syntax preflight failed: {syntax_error}",
+                "output": session.capture_pane(),
+            }
+
         try:
             session.send_keys(
                 [command, "Enter"],
