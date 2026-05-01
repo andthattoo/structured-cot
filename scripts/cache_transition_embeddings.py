@@ -62,6 +62,25 @@ def row_id(row: dict[str, Any], index: int, split: str) -> str:
     return str(row.get("example_id") or f"{split}:{index}")
 
 
+def resolve_encoder_dir(encoder_dir: Path) -> Path:
+    if (encoder_dir / "transition_config.json").exists():
+        return encoder_dir
+
+    raw = str(encoder_dir)
+    if not encoder_dir.exists() and "/" in raw and not raw.startswith((".", "/", "~")):
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:
+            raise SystemExit(
+                "Missing dependency: huggingface_hub. Run with:\n"
+                "  uv run --with torch --with transformers --with peft --with huggingface-hub "
+                "python scripts/cache_transition_embeddings.py ..."
+            ) from exc
+        return Path(snapshot_download(raw))
+
+    return encoder_dir
+
+
 def load_encoder_for_cache(encoder_dir: Path, device: str, dtype_name: str):
     import torch
     from transformers import AutoModel, AutoTokenizer
@@ -74,6 +93,7 @@ def load_encoder_for_cache(encoder_dir: Path, device: str, dtype_name: str):
             "  uv run --with torch --with transformers --with peft python scripts/cache_transition_embeddings.py ..."
         ) from exc
 
+    encoder_dir = resolve_encoder_dir(encoder_dir)
     config_path = encoder_dir / "transition_config.json"
     if not config_path.exists():
         raise FileNotFoundError(f"Missing transition config: {config_path}")
@@ -88,10 +108,12 @@ def load_encoder_for_cache(encoder_dir: Path, device: str, dtype_name: str):
     tokenizer.padding_side = "left"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
-    encoder = AutoModel.from_pretrained(base_model, torch_dtype=dtype, trust_remote_code=True).to(device)
     adapter_dir = encoder_dir / "encoder_adapter"
     if (adapter_dir / "adapter_config.json").exists():
+        encoder = AutoModel.from_pretrained(base_model, torch_dtype=dtype, trust_remote_code=True).to(device)
         encoder = PeftModel.from_pretrained(encoder, adapter_dir).to(device)
+    else:
+        encoder = AutoModel.from_pretrained(encoder_dir, torch_dtype=dtype, trust_remote_code=True).to(device)
     encoder.eval()
     head_blob = torch.load(encoder_dir / "transition_head.pt", map_location="cpu")
     TransitionHead = build_transition_head_class()
