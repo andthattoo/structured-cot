@@ -524,18 +524,20 @@ To publish the transition encoder and MQE critic to Hugging Face Hub:
 ```bash
 export HF_TOKEN=...
 
-uv run --with huggingface-hub python scripts/upload_hf_artifacts.py \
+uv run --with huggingface-hub --with torch --with transformers --with peft \
+  python scripts/upload_hf_artifacts.py \
   --transition-dir outputs/transition_encoder/qwen06b_agenttrove_50k_v0_steps2000_neg4 \
   --transition-repo driaforall/code-state-embedding \
   --critic-dir outputs/mqe/agenttrove_50k_transition_qwen06b_steps2000_neg4 \
   --critic-repo driaforall/code-mqe-critic \
+  --merge-transition-encoder \
   --dry-run
 ```
 
 Remove `--dry-run` to create/update the model repos. The uploader stages only
-the reusable artifacts (`encoder_adapter`, `transition_head.pt`, tokenizer
-files, `best.pt`, `metrics.json`) and writes model cards with the final
-validation metrics.
+the reusable artifacts. With `--merge-transition-encoder`, the Qwen
+0.6B embedding model is saved with the LoRA already merged, alongside
+`transition_head.pt`, `best.pt`, `metrics.json`, and generated model cards.
 
 Each run produces in `fsm_vs_free/`:
 - `results.jsonl` — per-problem raw generations, extracted think/code, pass/fail, errors, extraction metadata

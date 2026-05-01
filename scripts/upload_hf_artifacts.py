@@ -85,7 +85,59 @@ def copy_critic_artifacts(src: Path, dst: Path) -> None:
         copy_if_exists(src / name, dst / name)
 
 
-def transition_readme(src: Path, repo_id: str) -> str:
+def torch_dtype_from_name(dtype_name: str):
+    import torch
+
+    if dtype_name == "bfloat16":
+        return torch.bfloat16
+    if dtype_name == "float16":
+        return torch.float16
+    if dtype_name == "float32":
+        return torch.float32
+    raise ValueError("merge dtype must be one of float32, bfloat16, float16")
+
+
+def merge_transition_encoder(src: Path, dst: Path, *, dtype_name: str, device: str) -> None:
+    try:
+        from peft import PeftModel
+        from transformers import AutoModel, AutoTokenizer
+    except ImportError as exc:
+        raise SystemExit(
+            "Missing merge dependencies. Run with:\n"
+            "  uv run --with huggingface-hub --with torch --with transformers --with peft "
+            "python scripts/upload_hf_artifacts.py ..."
+        ) from exc
+
+    config = read_json(src / "transition_config.json")
+    base_model = config.get("base_model")
+    if not base_model:
+        raise ValueError(f"Missing base_model in {src / 'transition_config.json'}")
+    adapter_dir = src / "encoder_adapter"
+    if not (adapter_dir / "adapter_config.json").exists():
+        raise FileNotFoundError(f"Missing transition encoder adapter: {adapter_dir}")
+
+    dtype = torch_dtype_from_name(dtype_name)
+    print(
+        json.dumps(
+            {
+                "phase": "merge_transition_encoder",
+                "base_model": base_model,
+                "adapter_dir": str(adapter_dir),
+                "dtype": dtype_name,
+                "device": device,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(src, trust_remote_code=True)
+    base = AutoModel.from_pretrained(base_model, torch_dtype=dtype, trust_remote_code=True).to(device)
+    merged = PeftModel.from_pretrained(base, adapter_dir).merge_and_unload()
+    merged.save_pretrained(dst, safe_serialization=True)
+    tokenizer.save_pretrained(dst)
+
+
+def transition_readme(src: Path, repo_id: str, *, merged_encoder: bool) -> str:
     config = read_json(src / "transition_config.json")
     metrics_blob = read_json(src / "metrics.json")
     metrics = final_metrics(metrics_blob)
@@ -108,8 +160,20 @@ def transition_readme(src: Path, repo_id: str) -> str:
             "val_mean_positive_margin",
         ],
     )
+    library_name = "transformers" if merged_encoder else "peft"
+    contents = (
+        f"- merged `{base_model}` encoder weights with the transition LoRA applied\n"
+        if merged_encoder
+        else f"- `encoder_adapter/`: LoRA adapter for `{base_model}`\n"
+    )
+    loader_note = (
+        "The encoder weights in this repository are already merged with the LoRA adapter."
+        if merged_encoder
+        else "Load the base model and apply `encoder_adapter/` with PEFT before encoding."
+    )
+
     return f"""---
-library_name: peft
+library_name: {library_name}
 base_model: {base_model}
 tags:
 - code
@@ -137,7 +201,7 @@ critics, not to be used as a standalone verifier.
 
 ## Contents
 
-- `encoder_adapter/`: LoRA adapter for `{base_model}`
+{contents.rstrip()}
 - `transition_head.pt`: transition MLP and action-type auxiliary head
 - `transition_config.json`: training/config metadata
 - tokenizer files copied from the training output
@@ -160,6 +224,8 @@ critics, not to be used as a standalone verifier.
 {table}
 
 ## Usage
+
+{loader_note}
 
 This artifact is easiest to use from the `structured-cot` repository:
 
@@ -290,13 +356,28 @@ real environment, then self-distillation from successful traces.
 """
 
 
-def prepare_transition(src: Path, dst: Path, repo_id: str) -> None:
+def prepare_transition(
+    src: Path,
+    dst: Path,
+    repo_id: str,
+    *,
+    merge_encoder: bool,
+    merge_dtype: str,
+    merge_device: str,
+) -> None:
     if not (src / "transition_config.json").exists():
         raise FileNotFoundError(f"transition_config.json not found in {src}")
     if not (src / "transition_head.pt").exists():
         raise FileNotFoundError(f"transition_head.pt not found in {src}")
-    copy_transition_artifacts(src, dst)
-    (dst / "README.md").write_text(transition_readme(src, repo_id) + "\n")
+    if merge_encoder:
+        merge_transition_encoder(src, dst, dtype_name=merge_dtype, device=merge_device)
+        for name in ["transition_config.json", "transition_head.pt", "metrics.json"]:
+            copy_if_exists(src / name, dst / name)
+    else:
+        copy_transition_artifacts(src, dst)
+    (dst / "README.md").write_text(
+        transition_readme(src, repo_id, merged_encoder=merge_encoder) + "\n"
+    )
 
 
 def prepare_critic(src: Path, dst: Path, repo_id: str, transition_repo: str) -> None:
@@ -338,6 +419,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--staging-dir", type=Path, default=None)
     parser.add_argument("--hf-token-env", default="HF_TOKEN")
     parser.add_argument("--commit-message", default="Upload structured-cot research artifact")
+    parser.add_argument(
+        "--merge-transition-encoder",
+        action="store_true",
+        help="Merge the transition LoRA into the Qwen embedding base model before upload.",
+    )
+    parser.add_argument(
+        "--merge-dtype",
+        choices=["float32", "bfloat16", "float16"],
+        default="bfloat16",
+        help="Dtype used when saving a merged transition encoder.",
+    )
+    parser.add_argument(
+        "--merge-device",
+        default="cpu",
+        help="Device used for merging the transition encoder, e.g. cpu or cuda.",
+    )
     return parser.parse_args()
 
 
@@ -358,7 +455,14 @@ def main() -> int:
     try:
         if args.only in {"both", "transition"}:
             dst = root / "code-state-embedding"
-            prepare_transition(args.transition_dir, dst, args.transition_repo)
+            prepare_transition(
+                args.transition_dir,
+                dst,
+                args.transition_repo,
+                merge_encoder=args.merge_transition_encoder,
+                merge_dtype=args.merge_dtype,
+                merge_device=args.merge_device,
+            )
             staged.append(("transition", args.transition_repo, dst))
         if args.only in {"both", "critic"}:
             dst = root / "code-mqe-critic"
