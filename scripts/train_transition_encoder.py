@@ -147,6 +147,40 @@ class TransitionCollator:
         self.feature_dim = feature_dim
         self.max_hard_negatives = max_hard_negatives
 
+    def negative_category(self, source_row: dict[str, Any], neg_row: dict[str, Any]) -> str:
+        if neg_row.get("rollout_id") == source_row.get("rollout_id"):
+            return "same_rollout"
+        if neg_row.get("action_family_signature") == source_row.get("action_family_signature"):
+            return "same_signature"
+        return "other"
+
+    def select_balanced_negatives(self, source_row: dict[str, Any], indices: list[int]) -> list[tuple[int, str]]:
+        buckets = {"same_rollout": [], "same_signature": [], "other": []}
+        for neg_index in indices:
+            if not (0 <= neg_index < len(self.all_rows)):
+                continue
+            category = self.negative_category(source_row, self.all_rows[neg_index])
+            buckets[category].append(neg_index)
+
+        selected: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        order = ["same_signature", "same_rollout", "other"]
+        while len(selected) < self.max_hard_negatives:
+            added = False
+            for category in order:
+                while buckets[category] and buckets[category][0] in seen:
+                    buckets[category].pop(0)
+                if buckets[category]:
+                    neg_index = buckets[category].pop(0)
+                    selected.append((neg_index, category))
+                    seen.add(neg_index)
+                    added = True
+                    if len(selected) >= self.max_hard_negatives:
+                        break
+            if not added:
+                break
+        return selected
+
     def __call__(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         import torch
 
@@ -159,23 +193,16 @@ class TransitionCollator:
 
         for batch_row, item in enumerate(items):
             source_row = self.all_rows[item["index"]]
-            for neg_index in item["negative_next_indices"][: self.max_hard_negatives]:
-                if 0 <= neg_index < len(self.all_rows):
-                    neg = self.all_rows[neg_index]
-                    hard_next_texts.append(str(neg.get("next_state_text") or ""))
-                    hard_next_rows.append(batch_row)
-                    if neg.get("rollout_id") == source_row.get("rollout_id"):
-                        hard_next_categories.append("same_rollout")
-                    elif neg.get("action_family_signature") == source_row.get("action_family_signature"):
-                        hard_next_categories.append("same_signature")
-                    else:
-                        hard_next_categories.append("other")
-            for neg_index in item["negative_action_indices"][: self.max_hard_negatives]:
-                if 0 <= neg_index < len(self.all_rows):
-                    neg = self.all_rows[neg_index]
-                    hard_action_texts.append(action_text(neg))
-                    hard_action_features.append(pad_features(action_features(neg), self.feature_dim))
-                    hard_action_rows.append(batch_row)
+            for neg_index, category in self.select_balanced_negatives(source_row, item["negative_next_indices"]):
+                neg = self.all_rows[neg_index]
+                hard_next_texts.append(str(neg.get("next_state_text") or ""))
+                hard_next_rows.append(batch_row)
+                hard_next_categories.append(category)
+            for neg_index, _ in self.select_balanced_negatives(source_row, item["negative_action_indices"]):
+                neg = self.all_rows[neg_index]
+                hard_action_texts.append(action_text(neg))
+                hard_action_features.append(pad_features(action_features(neg), self.feature_dim))
+                hard_action_rows.append(batch_row)
 
         return {
             "indices": torch.tensor([item["index"] for item in items], dtype=torch.long),

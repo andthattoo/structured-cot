@@ -120,6 +120,27 @@ def test_prepare_adds_transition_schema_and_hard_negatives():
     assert records[1]["negative_action_indices"] == [0]
 
 
+def test_transition_collator_balances_hard_negative_categories():
+    rows = [
+        {
+            "rollout_id": "r0",
+            "action_family_signature": "fam:a",
+            "action_features": [1.0],
+            "negative_next_indices": [1, 2, 3, 4],
+            "negative_action_indices": [],
+        },
+        {"rollout_id": "r0", "action_family_signature": "fam:b", "action_features": [1.0]},
+        {"rollout_id": "r0", "action_family_signature": "fam:c", "action_features": [1.0]},
+        {"rollout_id": "r9", "action_family_signature": "fam:a", "action_features": [1.0]},
+        {"rollout_id": "r8", "action_family_signature": "fam:z", "action_features": [1.0]},
+    ]
+    collator = transition.TransitionCollator(rows, feature_dim=1, max_hard_negatives=2)
+
+    selected = collator.select_balanced_negatives(rows[0], [1, 2, 3, 4])
+
+    assert selected == [(3, "same_signature"), (1, "same_rollout")]
+
+
 def test_mqe_model_accepts_action_features():
     torch, _, _, _, _ = trainer.require_torch()
     model_cls = trainer.build_model_classes()
