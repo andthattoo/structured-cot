@@ -40,6 +40,9 @@ class TransitionTrainConfig:
     hard_action_weight: float = 0.25
     hard_action_margin: float = 0.1
     aux_action_type_weight: float = 0.05
+    gradient_checkpointing: bool = True
+    target_next_grad: bool = False
+    hard_negative_grad: bool = False
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
@@ -294,6 +297,13 @@ def load_lora_encoder(config: TransitionTrainConfig, device: str):
         dtype = torch.float16
     encoder = AutoModel.from_pretrained(config.model, torch_dtype=dtype, trust_remote_code=True).to(device)
     encoder.config.pad_token_id = tokenizer.pad_token_id
+    if config.gradient_checkpointing:
+        if hasattr(encoder.config, "use_cache"):
+            encoder.config.use_cache = False
+        if hasattr(encoder, "gradient_checkpointing_enable"):
+            encoder.gradient_checkpointing_enable()
+        if hasattr(encoder, "enable_input_require_grads"):
+            encoder.enable_input_require_grads()
     if config.lora_r > 0:
         lora = LoraConfig(
             r=config.lora_r,
@@ -487,28 +497,60 @@ def train_transition_encoder(config: TransitionTrainConfig) -> dict[str, Any]:
                 max_length=config.max_state_tokens,
                 device=device,
                 truncation_side="left",
-            )
+            ) if config.target_next_grad else None
+            if next_z is None:
+                with torch.no_grad():
+                    next_z = encode_texts(
+                        encoder,
+                        tokenizer,
+                        batch["next_state_texts"],
+                        max_length=config.max_state_tokens,
+                        device=device,
+                        truncation_side="left",
+                    )
             features = batch["action_features"].to(device)
             labels = batch["action_types"].to(device)
             pred, aux_logits = head(state_z, action_z, features)
-            hard_next_z = encode_texts(
-                encoder,
-                tokenizer,
-                batch["hard_next_texts"],
-                max_length=config.max_state_tokens,
-                device=device,
-                truncation_side="left",
-            )
+            if config.hard_negative_grad:
+                hard_next_z = encode_texts(
+                    encoder,
+                    tokenizer,
+                    batch["hard_next_texts"],
+                    max_length=config.max_state_tokens,
+                    device=device,
+                    truncation_side="left",
+                )
+            else:
+                with torch.no_grad():
+                    hard_next_z = encode_texts(
+                        encoder,
+                        tokenizer,
+                        batch["hard_next_texts"],
+                        max_length=config.max_state_tokens,
+                        device=device,
+                        truncation_side="left",
+                    )
             hard_next_rows = batch["hard_next_rows"].to(device)
             loss_retrieval, inbatch_logits = retrieval_loss(pred, next_z, hard_next_z, hard_next_rows, config.temperature)
-            hard_action_z = encode_texts(
-                encoder,
-                tokenizer,
-                batch["hard_action_texts"],
-                max_length=config.max_action_tokens,
-                device=device,
-                truncation_side="right",
-            )
+            if config.hard_negative_grad:
+                hard_action_z = encode_texts(
+                    encoder,
+                    tokenizer,
+                    batch["hard_action_texts"],
+                    max_length=config.max_action_tokens,
+                    device=device,
+                    truncation_side="right",
+                )
+            else:
+                with torch.no_grad():
+                    hard_action_z = encode_texts(
+                        encoder,
+                        tokenizer,
+                        batch["hard_action_texts"],
+                        max_length=config.max_action_tokens,
+                        device=device,
+                        truncation_side="right",
+                    )
             hard_action_rows = batch["hard_action_rows"].to(device)
             hard_action_features = batch["hard_action_features"].to(device)
             loss_hard_action = hard_action_loss(
@@ -617,6 +659,9 @@ def parse_args(argv: list[str] | None = None) -> TransitionTrainConfig:
     parser.add_argument("--hard-action-weight", type=float, default=TransitionTrainConfig.hard_action_weight)
     parser.add_argument("--hard-action-margin", type=float, default=TransitionTrainConfig.hard_action_margin)
     parser.add_argument("--aux-action-type-weight", type=float, default=TransitionTrainConfig.aux_action_type_weight)
+    parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--target-next-grad", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--hard-negative-grad", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--lora-r", type=int, default=TransitionTrainConfig.lora_r)
     parser.add_argument("--lora-alpha", type=int, default=TransitionTrainConfig.lora_alpha)
     parser.add_argument("--lora-dropout", type=float, default=TransitionTrainConfig.lora_dropout)
