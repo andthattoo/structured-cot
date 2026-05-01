@@ -93,6 +93,11 @@ XML_PARAMETER_RE = re.compile(
     r"(?P<value>.*?)(?:\s*</parameter>|\s*</function>|\s*</tool_call>|\s*\Z)",
     re.DOTALL | re.IGNORECASE,
 )
+XML_PARAMETER_ASSIGNED_RE = re.compile(
+    r"<parameter\s*=\s*\"?(?P<key>command|cmd|keystrokes|summary|final_answer)\"?"
+    r"\s*[:=]\s*\"?(?P<value>.*?)(?:\s*</parameter>|\s*</function>|\s*</tool_call>|\s*\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 RUN_SHELL_TOOL = {
@@ -177,7 +182,12 @@ class StructuredCotTerminalAgent(BaseAgent):
             "You are solving a Terminal-Bench task in a Linux shell. "
             "Use run_shell to inspect files, edit files, run tests, and "
             "verify your work. Use one non-interactive shell command per "
-            "tool call. Use finish only after the task is complete."
+            "tool call. Use finish only after the task is complete. "
+            "If a command that creates a named resource may have already "
+            "succeeded, inspect existing resources and reuse the matching "
+            "resource instead of creating another duplicate. If duplicates "
+            "exist, make the earliest or lowest-id matching resource satisfy "
+            "the task, since tests may inspect the first match."
         )
         if self.tool_mode == "text":
             prompt += (
@@ -331,6 +341,8 @@ class StructuredCotTerminalAgent(BaseAgent):
         for match in TOOL_VALUE_RE.finditer(text):
             values[match.group("key").lower()] = self._decode_tool_value(match.group("value"))
         for match in XML_PARAMETER_RE.finditer(text):
+            values[match.group("key").lower()] = self._decode_tool_value(match.group("value"))
+        for match in XML_PARAMETER_ASSIGNED_RE.finditer(text):
             values[match.group("key").lower()] = self._decode_tool_value(match.group("value"))
 
         if name == "run_shell":
