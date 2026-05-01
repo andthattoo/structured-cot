@@ -81,7 +81,12 @@ def resolve_encoder_dir(encoder_dir: Path) -> Path:
     return encoder_dir
 
 
-def load_encoder_for_cache(encoder_dir: Path, device: str, dtype_name: str):
+def load_encoder_for_cache(
+    encoder_dir: Path,
+    device: str,
+    dtype_name: str,
+    attn_implementation: str | None,
+):
     import torch
     from transformers import AutoModel, AutoTokenizer
 
@@ -104,17 +109,36 @@ def load_encoder_for_cache(encoder_dir: Path, device: str, dtype_name: str):
         dtype = torch.bfloat16
     elif dtype_name == "float16":
         dtype = torch.float16
+    model_kwargs: dict[str, Any] = {
+        "torch_dtype": dtype,
+        "trust_remote_code": True,
+    }
+    if attn_implementation:
+        model_kwargs["attn_implementation"] = attn_implementation
     tokenizer = AutoTokenizer.from_pretrained(encoder_dir, trust_remote_code=True)
     tokenizer.padding_side = "left"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
     adapter_dir = encoder_dir / "encoder_adapter"
     if (adapter_dir / "adapter_config.json").exists():
-        encoder = AutoModel.from_pretrained(base_model, torch_dtype=dtype, trust_remote_code=True).to(device)
+        encoder = AutoModel.from_pretrained(base_model, **model_kwargs).to(device)
         encoder = PeftModel.from_pretrained(encoder, adapter_dir).to(device)
     else:
-        encoder = AutoModel.from_pretrained(encoder_dir, torch_dtype=dtype, trust_remote_code=True).to(device)
+        encoder = AutoModel.from_pretrained(encoder_dir, **model_kwargs).to(device)
     encoder.eval()
+    first_param = next(encoder.parameters())
+    print(
+        json.dumps(
+            {
+                "phase": "encoder_loaded",
+                "device": str(first_param.device),
+                "dtype": str(first_param.dtype),
+                "attn_implementation": attn_implementation or "default",
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
     head_blob = torch.load(encoder_dir / "transition_head.pt", map_location="cpu")
     TransitionHead = build_transition_head_class()
     head = TransitionHead(
@@ -232,6 +256,7 @@ def encode_unique_texts(
     batch_size: int,
     device: str,
     progress_every: int,
+    sort_by_length: bool,
 ) -> tuple[Any, list[str]]:
     import torch
 
@@ -262,11 +287,17 @@ def encode_unique_texts(
         flush=True,
     )
 
+    encode_order = list(range(len(unique_texts)))
+    if sort_by_length:
+        encode_order.sort(key=lambda index: len(unique_texts[index]), reverse=True)
+
     parts = []
+    encoded_indices: list[int] = []
     total_batches = (len(unique_texts) + batch_size - 1) // batch_size
-    with torch.no_grad():
-        for batch_no, start in enumerate(range(0, len(unique_texts), batch_size), start=1):
-            batch_texts = unique_texts[start : start + batch_size]
+    with torch.inference_mode():
+        for batch_no, start in enumerate(range(0, len(encode_order), batch_size), start=1):
+            batch_indices = encode_order[start : start + batch_size]
+            batch_texts = [unique_texts[index] for index in batch_indices]
             encoded = encode_texts(
                 encoder,
                 tokenizer,
@@ -276,6 +307,7 @@ def encode_unique_texts(
                 truncation_side=truncation_side,
             )
             parts.append(encoded.cpu())
+            encoded_indices.extend(batch_indices)
             if progress_every > 0 and (batch_no == 1 or batch_no % progress_every == 0 or batch_no == total_batches):
                 elapsed = max(1e-6, time.time() - started)
                 done = min(start + batch_size, len(unique_texts))
@@ -298,7 +330,12 @@ def encode_unique_texts(
 
     if not parts:
         return torch.empty((0, 0)), []
-    unique_tensor = torch.cat(parts, dim=0)
+    encoded_tensor = torch.cat(parts, dim=0)
+    if sort_by_length:
+        unique_tensor = torch.empty_like(encoded_tensor)
+        unique_tensor[torch.tensor(encoded_indices, dtype=torch.long)] = encoded_tensor
+    else:
+        unique_tensor = encoded_tensor
     index_tensor = torch.tensor(indices, dtype=torch.long)
     return unique_tensor[index_tensor], [stable_hash(text) for text in texts]
 
@@ -318,6 +355,7 @@ def cache_split_deduped(
     head_batch_size: int,
     device: str,
     progress_every: int,
+    sort_by_length: bool,
 ) -> dict[str, Any]:
     import torch
 
@@ -350,6 +388,7 @@ def cache_split_deduped(
         batch_size=batch_size,
         device=device,
         progress_every=progress_every,
+        sort_by_length=sort_by_length,
     )
     row_count = len(rows)
     z_state = z_state_like[:row_count]
@@ -368,6 +407,7 @@ def cache_split_deduped(
         batch_size=batch_size,
         device=device,
         progress_every=progress_every,
+        sort_by_length=sort_by_length,
     )
 
     features = torch.tensor(
@@ -377,7 +417,7 @@ def cache_split_deduped(
     state_action_parts = []
     started = time.time()
     total_batches = (len(rows) + head_batch_size - 1) // head_batch_size
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch_no, start in enumerate(range(0, len(rows), head_batch_size), start=1):
             end = min(start + head_batch_size, len(rows))
             pred, _ = head(
@@ -435,6 +475,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-dedupe", action="store_true")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", choices=["float32", "bfloat16", "float16"], default="float32")
+    parser.add_argument("--attn-implementation", default=None)
+    parser.add_argument("--sort-by-length", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-train-rows", type=int, default=None)
     parser.add_argument("--max-val-rows", type=int, default=None)
     return parser.parse_args()
@@ -443,7 +485,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     device = resolve_device(args.device)
-    encoder, tokenizer, head, transition_config, head_blob = load_encoder_for_cache(args.encoder_dir, device, args.dtype)
+    encoder, tokenizer, head, transition_config, head_blob = load_encoder_for_cache(
+        args.encoder_dir,
+        device,
+        args.dtype,
+        args.attn_implementation,
+    )
     train_rows = read_jsonl(args.data_dir / "train.jsonl", args.max_train_rows)
     val_rows = read_jsonl(args.data_dir / "val.jsonl", args.max_val_rows)
     feature_dim = int(head_blob["action_feature_dim"])
@@ -471,8 +518,16 @@ def main() -> int:
     else:
         cache_kwargs["head_batch_size"] = args.head_batch_size
         cache_kwargs["progress_every"] = args.progress_every
+        cache_kwargs["sort_by_length"] = args.sort_by_length
         print(
-            json.dumps({"phase": "cache_mode", "mode": "dedupe"}, sort_keys=True),
+            json.dumps(
+                {
+                    "phase": "cache_mode",
+                    "mode": "dedupe",
+                    "sort_by_length": args.sort_by_length,
+                },
+                sort_keys=True,
+            ),
             flush=True,
         )
 
