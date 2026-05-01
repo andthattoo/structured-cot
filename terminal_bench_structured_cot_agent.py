@@ -68,6 +68,9 @@ DSL_REASONING_RE = re.compile(
 )
 
 
+TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+
+
 RUN_SHELL_TOOL = {
     "type": "function",
     "function": {
@@ -126,12 +129,16 @@ class StructuredCotTerminalAgent(BaseAgent):
         request_timeout_sec: int = 300,
         command_timeout_sec: float = 180.0,
         observation_chars: int = 12000,
+        tool_mode: str = "native",
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.grammar_mode = grammar_mode
+        if tool_mode not in {"native", "text"}:
+            raise ValueError("tool_mode must be 'native' or 'text'")
+        self.tool_mode = tool_mode
         self.temperature = float(temperature)
         self.max_tokens = int(max_tokens)
         self.max_turns = int(max_turns)
@@ -148,6 +155,14 @@ class StructuredCotTerminalAgent(BaseAgent):
             "verify your work. Use one non-interactive shell command per "
             "tool call. Use finish only after the task is complete."
         )
+        if self.tool_mode == "text":
+            prompt += (
+                " Emit tool calls as plain text using exactly this format: "
+                "<tool_call>{\"name\":\"run_shell\",\"arguments\":{\"command\":\"...\"}}</tool_call>. "
+                "When the task is complete, emit "
+                "<tool_call>{\"name\":\"finish\",\"arguments\":{\"summary\":\"...\"}}</tool_call>. "
+                "Do not wrap tool calls in markdown."
+            )
         if self.grammar_mode == "dsl":
             prompt += (
                 " Your reasoning is constrained to a compact PLAN/STATE/RISK/NEXT "
@@ -197,9 +212,10 @@ class StructuredCotTerminalAgent(BaseAgent):
             "messages": messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
-            "tools": [RUN_SHELL_TOOL, FINISH_TOOL],
-            "tool_choice": "auto",
         }
+        if self.tool_mode == "native":
+            payload["tools"] = [RUN_SHELL_TOOL, FINISH_TOOL]
+            payload["tool_choice"] = "auto"
         if self.grammar_mode == "reasoning":
             payload["grammar"] = REASONING_INNER_GRAMMAR
         elif self.grammar_mode == "step_status":
@@ -251,6 +267,114 @@ class StructuredCotTerminalAgent(BaseAgent):
         if reasoning is None:
             return ""
         return str(reasoning)
+
+    def _coerce_tool_args(self, args: Any) -> dict[str, Any]:
+        if isinstance(args, dict):
+            return dict(args)
+        if isinstance(args, str):
+            try:
+                loaded = json.loads(args)
+            except json.JSONDecodeError:
+                return {"command": args}
+            if isinstance(loaded, dict):
+                return dict(loaded)
+        return {}
+
+    def _normalize_tool_call(self, raw: dict[str, Any], index: int) -> dict[str, Any] | None:
+        function = raw.get("function") if isinstance(raw.get("function"), dict) else None
+        name = str(raw.get("name") or raw.get("tool") or (function or {}).get("name") or "")
+        args = self._coerce_tool_args(raw.get("arguments") if "arguments" in raw else (function or {}).get("arguments"))
+
+        if not name and "command" in args:
+            name = "run_shell"
+
+        shell_aliases = {"terminal", "shell", "bash", "run_command", "run_shell"}
+        if name in shell_aliases:
+            command = args.get("command") or args.get("cmd") or args.get("keystrokes")
+            timeout = args.get("max_timeout_sec")
+            if isinstance(command, list):
+                command = "\n".join(str(item).rstrip("\n") for item in command)
+            if command is None and isinstance(args.get("commands"), list):
+                command = "\n".join(
+                    str(item.get("keystrokes") or item.get("command") or "").rstrip("\n")
+                    for item in args["commands"]
+                    if isinstance(item, dict)
+                )
+            args = {"command": str(command or "").strip()}
+            if timeout is not None:
+                args["max_timeout_sec"] = timeout
+            name = "run_shell"
+        elif name == "finish" or bool(args.get("task_complete")):
+            name = "finish"
+            args = {
+                "summary": str(
+                    args.get("summary")
+                    or args.get("final_answer")
+                    or args.get("analysis")
+                    or "Task complete."
+                )
+            }
+        else:
+            return None
+
+        return {
+            "id": str(raw.get("id") or f"fallback_tool_call_{index}"),
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(args, ensure_ascii=False),
+            },
+        }
+
+    def _fallback_tool_calls_from_content(
+        self,
+        content: str,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        tool_calls: list[dict[str, Any]] = []
+
+        for match in TOOL_CALL_BLOCK_RE.finditer(content):
+            try:
+                raw = json.loads(match.group(1).strip())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(raw, dict):
+                call = self._normalize_tool_call(raw, len(tool_calls))
+                if call is not None:
+                    tool_calls.append(call)
+
+        if tool_calls:
+            return TOOL_CALL_BLOCK_RE.sub("", content).strip(), tool_calls
+
+        stripped = content.strip()
+        if not stripped.startswith("{"):
+            return content, []
+        try:
+            raw_json = json.loads(stripped)
+        except json.JSONDecodeError:
+            return content, []
+        if not isinstance(raw_json, dict):
+            return content, []
+
+        if isinstance(raw_json.get("commands"), list):
+            for command_item in raw_json["commands"]:
+                if not isinstance(command_item, dict):
+                    continue
+                command = str(command_item.get("keystrokes") or command_item.get("command") or "").strip()
+                if not command:
+                    continue
+                call = self._normalize_tool_call(
+                    {"name": "run_shell", "arguments": {"command": command}},
+                    len(tool_calls),
+                )
+                if call is not None:
+                    tool_calls.append(call)
+            if tool_calls:
+                return "", tool_calls
+
+        call = self._normalize_tool_call(raw_json, 0)
+        if call is None:
+            return content, []
+        return "", [call]
 
     def _run_shell(
         self,
@@ -356,6 +480,8 @@ class StructuredCotTerminalAgent(BaseAgent):
             message = choices[0].get("message") or {}
             tool_calls = message.get("tool_calls") or []
             content = message.get("content") or ""
+            if not tool_calls:
+                content, tool_calls = self._fallback_tool_calls_from_content(str(content or ""))
             if self.grammar_mode == "dsl":
                 reasoning = self._reasoning_content(message)
                 if not DSL_REASONING_RE.fullmatch(reasoning):
