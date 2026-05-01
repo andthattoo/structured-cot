@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import random
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,10 @@ class TransitionTrainConfig:
     max_train_rows: int | None = None
     max_val_rows: int | None = None
     max_steps: int | None = None
+    eval_every: int | None = None
+    save_every: int | None = None
+    keep_checkpoints: int = 3
+    save_optimizer: bool = False
     log_every: int = 10
 
 
@@ -464,6 +469,126 @@ def evaluate(encoder, tokenizer, head, rows: list[dict[str, Any]], config: Trans
     }
 
 
+def averaged(values: dict[str, list[float]]) -> dict[str, float]:
+    return {key: sum(items) / max(1, len(items)) for key, items in values.items()}
+
+
+def checkpoint_sort_key(path: Path) -> int:
+    try:
+        return int(path.name.rsplit("-", 1)[-1])
+    except ValueError:
+        return -1
+
+
+def prune_checkpoints(output_dir: Path, keep: int) -> None:
+    if keep <= 0:
+        return
+    checkpoints = sorted(output_dir.glob("checkpoint-step-*"), key=checkpoint_sort_key)
+    for path in checkpoints[:-keep]:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def write_transition_artifacts(
+    *,
+    target_dir: Path,
+    tokenizer,
+    encoder,
+    head,
+    optimizer,
+    config: TransitionTrainConfig,
+    embedding_dim: int,
+    feature_dim: int,
+    train_rows: list[dict[str, Any]],
+    val_rows: list[dict[str, Any]],
+    metrics: list[dict[str, Any]],
+    global_step: int,
+) -> None:
+    import torch
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tokenizer.save_pretrained(target_dir)
+    if config.lora_r > 0:
+        encoder.save_pretrained(target_dir / "encoder_adapter")
+    else:
+        encoder.save_pretrained(target_dir)
+    torch.save(
+        {
+            "transition_head_state_dict": head.state_dict(),
+            "embedding_dim": embedding_dim,
+            "action_feature_dim": feature_dim,
+            "action_types": ACTION_TYPES,
+            "config": asdict(config),
+            "metrics": metrics,
+            "global_step": global_step,
+        },
+        target_dir / "transition_head.pt",
+    )
+    (target_dir / "transition_config.json").write_text(
+        json.dumps(
+            {
+                "base_model": config.model,
+                "embedding_dim": embedding_dim,
+                "action_feature_dim": feature_dim,
+                "action_types": ACTION_TYPES,
+                "config": asdict(config),
+                "global_step": global_step,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    summary = {
+        "output_dir": str(target_dir),
+        "train_rows": len(train_rows),
+        "val_rows": len(val_rows),
+        "embedding_dim": embedding_dim,
+        "action_feature_dim": feature_dim,
+        "global_step": global_step,
+        "metrics": metrics,
+    }
+    (target_dir / "metrics.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    if config.save_optimizer:
+        torch.save(
+            {
+                "optimizer_state_dict": optimizer.state_dict(),
+                "global_step": global_step,
+                "config": asdict(config),
+            },
+            target_dir / "trainer_state.pt",
+        )
+
+
+def append_eval_row(
+    *,
+    encoder,
+    tokenizer,
+    head,
+    val_rows: list[dict[str, Any]],
+    config: TransitionTrainConfig,
+    feature_dim: int,
+    device: str,
+    epoch: int,
+    global_step: int,
+    running: dict[str, list[float]],
+    metrics: list[dict[str, Any]],
+    phase: str,
+) -> dict[str, Any]:
+    val_metrics = evaluate(encoder, tokenizer, head, val_rows, config, feature_dim, device)
+    row = {
+        "epoch": epoch,
+        "step": global_step,
+        "phase": phase,
+        **{f"train_{key}": value for key, value in averaged(running).items()},
+        **{f"val_{key}": value for key, value in val_metrics.items()},
+    }
+    metrics.append(row)
+    print(json.dumps(row, sort_keys=True), flush=True)
+    encoder.train()
+    head.train()
+    return row
+
+
 def train_transition_encoder(config: TransitionTrainConfig) -> dict[str, Any]:
     torch, _, F, DataLoader = require_torch()
 
@@ -496,6 +621,8 @@ def train_transition_encoder(config: TransitionTrainConfig) -> dict[str, Any]:
     metrics: list[dict[str, Any]] = []
     global_step = 0
     stop_training = False
+    last_eval_step: int | None = None
+    last_save_step: int | None = None
 
     for epoch in range(1, config.epochs + 1):
         encoder.train()
@@ -619,51 +746,94 @@ def train_transition_encoder(config: TransitionTrainConfig) -> dict[str, Any]:
             }.items():
                 running.setdefault(name, []).append(value)
             if config.log_every > 0 and global_step % config.log_every == 0:
-                print(json.dumps({"epoch": epoch, "step": global_step, **{k: sum(v) / len(v) for k, v in running.items()}}, sort_keys=True))
+                print(json.dumps({"epoch": epoch, "step": global_step, **averaged(running)}, sort_keys=True), flush=True)
+            if (
+                config.eval_every is not None
+                and config.eval_every > 0
+                and global_step % config.eval_every == 0
+                and last_eval_step != global_step
+            ):
+                append_eval_row(
+                    encoder=encoder,
+                    tokenizer=tokenizer,
+                    head=head,
+                    val_rows=val_rows,
+                    config=config,
+                    feature_dim=feature_dim,
+                    device=device,
+                    epoch=epoch,
+                    global_step=global_step,
+                    running=running,
+                    metrics=metrics,
+                    phase="periodic_eval",
+                )
+                last_eval_step = global_step
+            if (
+                config.save_every is not None
+                and config.save_every > 0
+                and global_step % config.save_every == 0
+                and last_save_step != global_step
+            ):
+                checkpoint_dir = output_dir / f"checkpoint-step-{global_step}"
+                write_transition_artifacts(
+                    target_dir=checkpoint_dir,
+                    tokenizer=tokenizer,
+                    encoder=encoder,
+                    head=head,
+                    optimizer=optimizer,
+                    config=config,
+                    embedding_dim=embedding_dim,
+                    feature_dim=feature_dim,
+                    train_rows=train_rows,
+                    val_rows=val_rows,
+                    metrics=metrics,
+                    global_step=global_step,
+                )
+                prune_checkpoints(output_dir, config.keep_checkpoints)
+                last_save_step = global_step
+                print(
+                    json.dumps(
+                        {"checkpoint": str(checkpoint_dir), "phase": "save_checkpoint", "step": global_step},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
             if config.max_steps is not None and global_step >= config.max_steps:
                 stop_training = True
                 break
 
-        val_metrics = evaluate(encoder, tokenizer, head, val_rows, config, feature_dim, device)
-        row = {
-            "epoch": epoch,
-            "step": global_step,
-            **{f"train_{key}": sum(values) / max(1, len(values)) for key, values in running.items()},
-            **{f"val_{key}": value for key, value in val_metrics.items()},
-        }
-        metrics.append(row)
-        print(json.dumps(row, sort_keys=True))
+        if last_eval_step != global_step:
+            append_eval_row(
+                encoder=encoder,
+                tokenizer=tokenizer,
+                head=head,
+                val_rows=val_rows,
+                config=config,
+                feature_dim=feature_dim,
+                device=device,
+                epoch=epoch,
+                global_step=global_step,
+                running=running,
+                metrics=metrics,
+                phase="epoch_end",
+            )
+            last_eval_step = global_step
         if stop_training:
             break
 
-    tokenizer.save_pretrained(output_dir)
-    adapter_dir = output_dir / "encoder_adapter"
-    if config.lora_r > 0:
-        encoder.save_pretrained(adapter_dir)
-    torch.save(
-        {
-            "transition_head_state_dict": head.state_dict(),
-            "embedding_dim": embedding_dim,
-            "action_feature_dim": feature_dim,
-            "action_types": ACTION_TYPES,
-            "config": asdict(config),
-            "metrics": metrics,
-        },
-        output_dir / "transition_head.pt",
-    )
-    (output_dir / "transition_config.json").write_text(
-        json.dumps(
-            {
-                "base_model": config.model,
-                "embedding_dim": embedding_dim,
-                "action_feature_dim": feature_dim,
-                "action_types": ACTION_TYPES,
-                "config": asdict(config),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
+    write_transition_artifacts(
+        target_dir=output_dir,
+        tokenizer=tokenizer,
+        encoder=encoder,
+        head=head,
+        optimizer=optimizer,
+        config=config,
+        embedding_dim=embedding_dim,
+        feature_dim=feature_dim,
+        train_rows=train_rows,
+        val_rows=val_rows,
+        metrics=metrics,
+        global_step=global_step,
     )
     summary = {
         "output_dir": str(output_dir),
@@ -671,9 +841,9 @@ def train_transition_encoder(config: TransitionTrainConfig) -> dict[str, Any]:
         "val_rows": len(val_rows),
         "embedding_dim": embedding_dim,
         "action_feature_dim": feature_dim,
+        "global_step": global_step,
         "metrics": metrics,
     }
-    (output_dir / "metrics.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     return summary
 
 
@@ -710,6 +880,10 @@ def parse_args(argv: list[str] | None = None) -> TransitionTrainConfig:
     parser.add_argument("--max-train-rows", type=int, default=None)
     parser.add_argument("--max-val-rows", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--eval-every", type=int, default=None)
+    parser.add_argument("--save-every", type=int, default=None)
+    parser.add_argument("--keep-checkpoints", type=int, default=TransitionTrainConfig.keep_checkpoints)
+    parser.add_argument("--save-optimizer", action="store_true")
     parser.add_argument("--log-every", type=int, default=TransitionTrainConfig.log_every)
     return TransitionTrainConfig(**vars(parser.parse_args(argv)))
 
