@@ -68,7 +68,7 @@ printf 'Hello, world!\\n' > hello.txt
     assert "printf" in tool_calls[0]["function"]["arguments"]
 
 
-def test_qwen_xml_prompt_uses_compact_dsl_without_grammar() -> None:
+def test_qwen_xml_auto_prompt_uses_leo_contract_before_task_appendix() -> None:
     agent = StructuredCotTerminalAgent(
         model="test-model",
         tool_mode="qwen_xml",
@@ -78,10 +78,27 @@ def test_qwen_xml_prompt_uses_compact_dsl_without_grammar() -> None:
     prompt = agent._system_prompt()
     payload = agent._make_payload([], rerank=False)
 
+    assert prompt.startswith("When thinking before tool use")
     assert "PLAN: one symbolic control-flow plan" in prompt
+    assert prompt.index("When calling tools, use Qwen XML") < prompt.index(
+        "Terminal-Bench task-specific instructions"
+    )
     assert "<function=run_shell>" in prompt
     assert "<function=finish>" in prompt
     assert "grammar" not in payload
+
+
+def test_qwen_xml_can_use_default_terminal_prompt() -> None:
+    agent = StructuredCotTerminalAgent(
+        model="test-model",
+        tool_mode="qwen_xml",
+        prompt_profile="default",
+    )
+
+    prompt = agent._system_prompt()
+
+    assert prompt.startswith("You are solving a Terminal-Bench task")
+    assert "When calling tools, use Qwen XML" in prompt
 
 
 def test_recovers_hybrid_finish_call() -> None:

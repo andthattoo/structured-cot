@@ -11,7 +11,7 @@
 #   GRAMMAR_MODE=phase ./scripts/run_terminal_bench_smoke.sh      # PHASE/CHECK/NEXT
 #   GRAMMAR_MODE=dsl ./scripts/run_terminal_bench_smoke.sh        # PLAN/STATE/RISK/NEXT
 #   TOOL_MODE=qwen_xml GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
-#       # prompt-only compact DSL + Qwen XML tool calls for QwenXML LoRA eval
+#       # Qwen Leo compact-DSL prompt + Qwen XML tool calls, no server grammar
 #
 # Run the full dataset by omitting --task-id:
 #   TASK_ID=all GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
@@ -27,6 +27,7 @@ BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
 MODEL="${MODEL:-ggml-org/Qwen3.6-27B-GGUF}"
 GRAMMAR_MODE="${GRAMMAR_MODE:-none}"
 TOOL_MODE="${TOOL_MODE:-native}"
+PROMPT_PROFILE="${PROMPT_PROFILE:-auto}"
 MQE_MODE="${MQE_MODE:-none}"
 MQE_ENCODER_DIR="${MQE_ENCODER_DIR:-driaforall/code-state-embedding}"
 MQE_CRITIC_DIR="${MQE_CRITIC_DIR:-driaforall/code-mqe-critic-actionchoice}"
@@ -75,6 +76,7 @@ echo "  base_url     = ${BASE_URL}"
 echo "  model        = ${MODEL}"
 echo "  grammar_mode = ${GRAMMAR_MODE}"
 echo "  tool_mode    = ${TOOL_MODE}"
+echo "  prompt       = ${PROMPT_PROFILE}"
 echo "  mqe_mode     = ${MQE_MODE}"
 if [ "${MQE_MODE}" != "none" ]; then
     echo "  mqe_encoder  = ${MQE_ENCODER_DIR}"
@@ -105,6 +107,7 @@ PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}" "${TB_BIN}" run \
     --agent-kwarg "model=${MODEL}" \
     --agent-kwarg "grammar_mode=${GRAMMAR_MODE}" \
     --agent-kwarg "tool_mode=${TOOL_MODE}" \
+    --agent-kwarg "prompt_profile=${PROMPT_PROFILE}" \
     --agent-kwarg "mqe_mode=${MQE_MODE}" \
     --agent-kwarg "mqe_encoder_dir=${MQE_ENCODER_DIR}" \
     --agent-kwarg "mqe_critic_dir=${MQE_CRITIC_DIR}" \

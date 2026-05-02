@@ -143,6 +143,62 @@ FINISH_TOOL = {
 }
 
 
+QWEN_LEO_PROMPT = (
+    "When thinking before tool use, use this compact DSL inside <think> tags:\n"
+    "PLAN: one symbolic control-flow plan\n"
+    "STATE: current state\n"
+    "RISK: main risk to avoid\n"
+    "NEXT: tool_call or final\n"
+    "Use the DSL as a decision record for the next action, then emit the "
+    "tool call or final answer normally.\n\n"
+    "When calling tools, use Qwen XML tool-call format exactly:\n"
+    "<tool_call>\n"
+    "<function=tool_name>\n"
+    "<parameter=parameter_name>\n"
+    "parameter value\n"
+    "</parameter>\n"
+    "</function>\n"
+    "</tool_call>"
+)
+
+
+TERMINAL_BENCH_PROMPT = (
+    "You are solving a Terminal-Bench task in a Linux shell. "
+    "Use run_shell to inspect files, edit files, run tests, and verify your work. "
+    "Use one non-interactive shell command per tool call. "
+    "Use finish only after the task is complete. "
+    "If a command that creates a named resource may have already succeeded, "
+    "inspect existing resources and reuse the matching resource instead of "
+    "creating another duplicate. If duplicates exist, make the earliest or "
+    "lowest-id matching resource satisfy the task, since tests may inspect "
+    "the first match."
+)
+
+
+QWEN_LEO_TERMINAL_APPENDIX = (
+    "Terminal-Bench task-specific instructions:\n"
+    "The only tool names available in this environment are run_shell and finish.\n"
+    "For run_shell, put exactly one non-interactive shell command in "
+    "<parameter=command>:\n"
+    "<tool_call>\n"
+    "<function=run_shell>\n"
+    "<parameter=command>\n"
+    "one non-interactive shell command\n"
+    "</parameter>\n"
+    "</function>\n"
+    "</tool_call>\n"
+    "When the task is complete, use finish with a short summary:\n"
+    "<tool_call>\n"
+    "<function=finish>\n"
+    "<parameter=summary>\n"
+    "brief completion summary\n"
+    "</parameter>\n"
+    "</function>\n"
+    "</tool_call>\n\n"
+    + TERMINAL_BENCH_PROMPT
+)
+
+
 class StructuredCotTerminalAgent(BaseAgent):
     _mqe_scorers: dict[tuple[str, str, str], Any] = {}
 
@@ -162,6 +218,7 @@ class StructuredCotTerminalAgent(BaseAgent):
         command_timeout_sec: float = 180.0,
         observation_chars: int = 12000,
         tool_mode: str = "native",
+        prompt_profile: str = "auto",
         mqe_mode: str = "none",
         mqe_encoder_dir: str = "driaforall/code-state-embedding",
         mqe_critic_dir: str = "driaforall/code-mqe-critic-actionchoice",
@@ -180,6 +237,9 @@ class StructuredCotTerminalAgent(BaseAgent):
         if tool_mode not in {"native", "text", "qwen_xml"}:
             raise ValueError("tool_mode must be 'native', 'text', or 'qwen_xml'")
         self.tool_mode = tool_mode
+        if prompt_profile not in {"auto", "default", "qwen_leo"}:
+            raise ValueError("prompt_profile must be 'auto', 'default', or 'qwen_leo'")
+        self.prompt_profile = prompt_profile
         self.temperature = float(temperature)
         self.max_tokens = int(max_tokens)
         self.max_turns = int(max_turns)
@@ -200,18 +260,17 @@ class StructuredCotTerminalAgent(BaseAgent):
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
+    def _resolved_prompt_profile(self) -> str:
+        if self.prompt_profile == "auto":
+            return "qwen_leo" if self.tool_mode == "qwen_xml" else "default"
+        return self.prompt_profile
+
     def _system_prompt(self) -> str:
-        prompt = (
-            "You are solving a Terminal-Bench task in a Linux shell. "
-            "Use run_shell to inspect files, edit files, run tests, and "
-            "verify your work. Use one non-interactive shell command per "
-            "tool call. Use finish only after the task is complete. "
-            "If a command that creates a named resource may have already "
-            "succeeded, inspect existing resources and reuse the matching "
-            "resource instead of creating another duplicate. If duplicates "
-            "exist, make the earliest or lowest-id matching resource satisfy "
-            "the task, since tests may inspect the first match."
-        )
+        if self._resolved_prompt_profile() == "qwen_leo":
+            prompt = QWEN_LEO_PROMPT + "\n\n" + QWEN_LEO_TERMINAL_APPENDIX
+            return prompt
+
+        prompt = TERMINAL_BENCH_PROMPT
         if self.tool_mode == "text":
             prompt += (
                 " Emit tool calls as plain text using exactly this format: "
@@ -222,13 +281,6 @@ class StructuredCotTerminalAgent(BaseAgent):
             )
         elif self.tool_mode == "qwen_xml":
             prompt += (
-                " When thinking before tool use, use this compact DSL inside "
-                "<think> tags, with no prose inside the block:\n"
-                "PLAN: one symbolic control-flow plan\n"
-                "STATE: current state\n"
-                "RISK: main risk to avoid\n"
-                "NEXT: tool_call or final\n"
-                "Use the DSL as a decision record for the next action. "
                 "When calling tools, use Qwen XML tool-call format exactly:\n"
                 "<tool_call>\n"
                 "<function=run_shell>\n"

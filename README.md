@@ -216,7 +216,9 @@ agent traces, then train or dynamically select compact reasoning-state
 grammars per turn.
 
 For LoRA adapters trained on the QwenXML compact-DSL data, test the learned
-format without server-side grammar by using the prompt-only XML mode:
+format without server-side grammar by using the prompt-only XML mode. This
+uses the same generic compact-DSL + QwenXML contract as the SFT data first,
+then appends Terminal-Bench-specific `run_shell` / `finish` instructions:
 
 ```bash
 GRAMMAR_MODE=none TOOL_MODE=qwen_xml MODEL=qwen-leo-pi-warm-1 \
