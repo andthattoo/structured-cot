@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a LoRA adapter on DSL SFT JSONL.")
     parser.add_argument("--train-jsonl", type=Path, required=True)
     parser.add_argument("--model", required=True, help="HF Transformers checkpoint id/path.")
+    parser.add_argument(
+        "--adapter",
+        default=None,
+        help="Optional PEFT adapter id/path to continue training instead of starting a new LoRA.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--max-seq-len", type=int, default=4096)
     parser.add_argument("--context-messages", type=int, default=12)
@@ -348,7 +353,7 @@ def main() -> None:
     args = parse_args()
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Trainer, TrainingArguments
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
     except ImportError as exc:
         raise SystemExit(
             "Missing training deps. Install on the training box with:\n"
@@ -391,15 +396,18 @@ def main() -> None:
     if not args.no_4bit:
         model = prepare_model_for_kbit_training(model)
 
-    lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=[item.strip() for item in args.target_modules.split(",") if item.strip()],
-    )
-    model = get_peft_model(model, lora_config)
+    if args.adapter:
+        model = PeftModel.from_pretrained(model, args.adapter, is_trainable=True)
+    else:
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=[item.strip() for item in args.target_modules.split(",") if item.strip()],
+        )
+        model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
     examples = load_turn_examples(

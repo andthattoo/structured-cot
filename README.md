@@ -447,6 +447,45 @@ uv run --with peft --with accelerate --with bitsandbytes \
 This path defaults to `attn_implementation=eager`, because the custom 4D mask
 is more reliable there than through FlashAttention/SDPA during early tests.
 
+To produce stricter multi-turn DSL rows for a follow-up Leo protocol SFT run,
+repair successful traces while preserving their actions:
+
+```bash
+uv run python scripts/prepare_strict_dsl_sft.py \
+    --dataset DJLougen/hermes-agent-traces-filtered \
+    --split train \
+    --require-success \
+    --tool-format qwen_xml \
+    --variants preserved,strip_prior_think,action_only_prior \
+    --out data/sft/hermes_strict_qwenxml_multiturn.jsonl
+```
+
+The strict generator emits:
+
+- `preserved`: full conversations where prior assistant DSL remains in context.
+- `strip_prior_think`: one row per target turn with prior `<think>...</think>`
+  removed.
+- `action_only_prior`: one row per target turn with prior assistant messages
+  reduced to tool calls when possible.
+
+Those rows are meant for direct protocol continuation SFT, usually from the
+existing Leo adapter, with the normal `assistant_turn` objective:
+
+```bash
+uv run --with peft --with accelerate --with bitsandbytes \
+  python scripts/train_dsl_sft_lora.py \
+    --train-jsonl data/sft/hermes_strict_qwenxml_multiturn.jsonl \
+    --model Qwen/Qwen3.6-27B \
+    --adapter andthattoo/qwen-leo-pi-warm-1 \
+    --output-dir runs/dsl-strict-qwen36-27b-qwenxml-lora \
+    --max-seq-len 4096 \
+    --context-messages 12 \
+    --epochs 1 \
+    --batch-size 1 \
+    --grad-accum 16 \
+    --learning-rate 5e-5
+```
+
 ### AgentTrove MQE critic pilot
 
 AgentTrove Terminus-2 traces can also train a small directed-distance critic for
