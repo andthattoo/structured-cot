@@ -215,6 +215,32 @@ grammar; the longer-term experiment is to mine these labels from successful
 agent traces, then train or dynamically select compact reasoning-state
 grammars per turn.
 
+For LoRA adapters trained on the QwenXML compact-DSL data, test the learned
+format without server-side grammar by using the prompt-only XML mode:
+
+```bash
+GRAMMAR_MODE=none TOOL_MODE=qwen_xml MODEL=qwen-leo-pi-warm-1 \
+    ./scripts/run_terminal_bench_smoke.sh
+```
+
+This asks the model to emit the trained shape directly:
+
+```text
+<think>
+PLAN: ...
+STATE: ...
+RISK: ...
+NEXT: tool_call
+</think>
+<tool_call>
+<function=run_shell>
+<parameter=command>
+...
+</parameter>
+</function>
+</tool_call>
+```
+
 The script defaults to `terminal-bench-core==0.1.1` and `hello-world`. Override
 with `TASK_ID=...`, `DATASET=...`, `MODEL=...`, or `BASE_URL=...`. Use
 `TASK_ID=all` to omit `--task-id` and run the full dataset:

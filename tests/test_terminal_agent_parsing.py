@@ -45,6 +45,45 @@ def test_recovers_assigned_xml_parameter_command() -> None:
     assert "Content-Type: application/json" in arguments
 
 
+def test_recovers_qwen_xml_command() -> None:
+    agent = StructuredCotTerminalAgent()
+    content = """<think>
+PLAN: seq(observe,act,verify,finish)
+STATE: need_action
+RISK: none
+NEXT: tool_call
+</think>
+<tool_call>
+<function=run_shell>
+<parameter=command>
+printf 'Hello, world!\\n' > hello.txt
+</parameter>
+</function>
+</tool_call>"""
+
+    _, tool_calls = agent._fallback_tool_calls_from_content(content)
+
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "run_shell"
+    assert "printf" in tool_calls[0]["function"]["arguments"]
+
+
+def test_qwen_xml_prompt_uses_compact_dsl_without_grammar() -> None:
+    agent = StructuredCotTerminalAgent(
+        model="test-model",
+        tool_mode="qwen_xml",
+        grammar_mode="none",
+    )
+
+    prompt = agent._system_prompt()
+    payload = agent._make_payload([], rerank=False)
+
+    assert "PLAN: one symbolic control-flow plan" in prompt
+    assert "<function=run_shell>" in prompt
+    assert "<function=finish>" in prompt
+    assert "grammar" not in payload
+
+
 def test_recovers_hybrid_finish_call() -> None:
     agent = StructuredCotTerminalAgent()
     content = """<tool_call>

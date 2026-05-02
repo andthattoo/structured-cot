@@ -177,8 +177,8 @@ class StructuredCotTerminalAgent(BaseAgent):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.grammar_mode = grammar_mode
-        if tool_mode not in {"native", "text"}:
-            raise ValueError("tool_mode must be 'native' or 'text'")
+        if tool_mode not in {"native", "text", "qwen_xml"}:
+            raise ValueError("tool_mode must be 'native', 'text', or 'qwen_xml'")
         self.tool_mode = tool_mode
         self.temperature = float(temperature)
         self.max_tokens = int(max_tokens)
@@ -218,6 +218,33 @@ class StructuredCotTerminalAgent(BaseAgent):
                 "<tool_call>{\"name\":\"run_shell\",\"arguments\":{\"command\":\"...\"}}</tool_call>. "
                 "When the task is complete, emit "
                 "<tool_call>{\"name\":\"finish\",\"arguments\":{\"summary\":\"...\"}}</tool_call>. "
+                "Do not wrap tool calls in markdown."
+            )
+        elif self.tool_mode == "qwen_xml":
+            prompt += (
+                " When thinking before tool use, use this compact DSL inside "
+                "<think> tags, with no prose inside the block:\n"
+                "PLAN: one symbolic control-flow plan\n"
+                "STATE: current state\n"
+                "RISK: main risk to avoid\n"
+                "NEXT: tool_call or final\n"
+                "Use the DSL as a decision record for the next action. "
+                "When calling tools, use Qwen XML tool-call format exactly:\n"
+                "<tool_call>\n"
+                "<function=run_shell>\n"
+                "<parameter=command>\n"
+                "one non-interactive shell command\n"
+                "</parameter>\n"
+                "</function>\n"
+                "</tool_call>\n"
+                "When the task is complete, use:\n"
+                "<tool_call>\n"
+                "<function=finish>\n"
+                "<parameter=summary>\n"
+                "brief completion summary\n"
+                "</parameter>\n"
+                "</function>\n"
+                "</tool_call>\n"
                 "Do not wrap tool calls in markdown."
             )
         if self.grammar_mode == "dsl":

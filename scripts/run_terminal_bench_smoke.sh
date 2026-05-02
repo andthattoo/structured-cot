@@ -10,6 +10,8 @@
 #   GRAMMAR_MODE=step_status ./scripts/run_terminal_bench_smoke.sh # STEP/STATUS
 #   GRAMMAR_MODE=phase ./scripts/run_terminal_bench_smoke.sh      # PHASE/CHECK/NEXT
 #   GRAMMAR_MODE=dsl ./scripts/run_terminal_bench_smoke.sh        # PLAN/STATE/RISK/NEXT
+#   TOOL_MODE=qwen_xml GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
+#       # prompt-only compact DSL + Qwen XML tool calls for QwenXML LoRA eval
 #
 # Run the full dataset by omitting --task-id:
 #   TASK_ID=all GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
