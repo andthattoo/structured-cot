@@ -66,3 +66,34 @@ def test_tmux_safe_command_wraps_only_multiline_commands() -> None:
     assert "\n" not in wrapped
     assert "base64 -d" in wrapped
     assert "structured_cot_cmd_" in wrapped
+
+
+def test_mqe_payload_requests_multiple_candidates() -> None:
+    agent = StructuredCotTerminalAgent(model="test-model", mqe_mode="rerank", mqe_candidates=4)
+
+    payload = agent._make_payload([], rerank=True)
+
+    assert payload["n"] == 4
+    assert payload["temperature"] == agent.mqe_temperature
+    assert payload["top_p"] == agent.mqe_top_p
+
+
+def test_mqe_rerank_selects_highest_scoring_command() -> None:
+    agent = StructuredCotTerminalAgent(model="test-model", mqe_mode="rerank", mqe_candidates=2)
+    agent._score_mqe_actions = lambda **kwargs: [0.1, 0.9]  # type: ignore[method-assign]
+    choices = [
+        {
+            "message": {
+                "content": '<tool_call>{"name":"run_shell","arguments":{"command":"echo bad"}}</tool_call>'
+            }
+        },
+        {
+            "message": {
+                "content": '<tool_call>{"name":"run_shell","arguments":{"command":"echo good"}}</tool_call>'
+            }
+        },
+    ]
+
+    _, _, tool_calls = agent._select_choice_with_mqe(choices, [], "task", None, 1)
+
+    assert "echo good" in tool_calls[0]["function"]["arguments"]

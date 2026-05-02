@@ -14,6 +14,7 @@ import json
 import re
 import shlex
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -143,6 +144,8 @@ FINISH_TOOL = {
 
 
 class StructuredCotTerminalAgent(BaseAgent):
+    _mqe_scorers: dict[tuple[str, str, str], Any] = {}
+
     @staticmethod
     def name() -> str:
         return "structured-cot-terminal"
@@ -159,6 +162,15 @@ class StructuredCotTerminalAgent(BaseAgent):
         command_timeout_sec: float = 180.0,
         observation_chars: int = 12000,
         tool_mode: str = "native",
+        mqe_mode: str = "none",
+        mqe_encoder_dir: str = "driaforall/code-state-embedding",
+        mqe_critic_dir: str = "driaforall/code-mqe-critic-actionchoice",
+        mqe_device: str = "auto",
+        mqe_candidates: int = 1,
+        mqe_temperature: float = 0.7,
+        mqe_top_p: float = 0.95,
+        mqe_state_chars: int = 20000,
+        mqe_goal_chars: int = 8000,
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
@@ -174,6 +186,17 @@ class StructuredCotTerminalAgent(BaseAgent):
         self.request_timeout_sec = int(request_timeout_sec)
         self.command_timeout_sec = float(command_timeout_sec)
         self.observation_chars = int(observation_chars)
+        if mqe_mode not in {"none", "rerank"}:
+            raise ValueError("mqe_mode must be 'none' or 'rerank'")
+        self.mqe_mode = mqe_mode
+        self.mqe_encoder_dir = str(mqe_encoder_dir)
+        self.mqe_critic_dir = str(mqe_critic_dir)
+        self.mqe_device = str(mqe_device)
+        self.mqe_candidates = max(1, int(mqe_candidates))
+        self.mqe_temperature = float(mqe_temperature)
+        self.mqe_top_p = float(mqe_top_p)
+        self.mqe_state_chars = int(mqe_state_chars)
+        self.mqe_goal_chars = int(mqe_goal_chars)
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
@@ -240,13 +263,16 @@ class StructuredCotTerminalAgent(BaseAgent):
             raise RuntimeError("No models returned by server /v1/models")
         return models[0]
 
-    def _make_payload(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    def _make_payload(self, messages: list[dict[str, Any]], *, rerank: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._get_default_model(),
             "messages": messages,
-            "temperature": self.temperature,
+            "temperature": self.mqe_temperature if rerank else self.temperature,
             "max_tokens": self.max_tokens,
         }
+        if rerank and self.mqe_candidates > 1:
+            payload["n"] = self.mqe_candidates
+            payload["top_p"] = self.mqe_top_p
         if self.tool_mode == "native":
             payload["tools"] = [RUN_SHELL_TOOL, FINISH_TOOL]
             payload["tool_choice"] = "auto"
@@ -461,6 +487,255 @@ class StructuredCotTerminalAgent(BaseAgent):
             return content, []
         return "", [call]
 
+    def _tool_calls_from_message(self, message: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+        tool_calls = message.get("tool_calls") or []
+        content = str(message.get("content") or "")
+        if not tool_calls:
+            content, tool_calls = self._fallback_tool_calls_from_content(content)
+        return content, tool_calls
+
+    def _resolve_hf_or_local_dir(self, path_or_repo: str) -> Path:
+        path = Path(path_or_repo)
+        if path.exists():
+            return path
+        if "/" not in path_or_repo or path_or_repo.startswith((".", "/", "~")):
+            return path
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:
+            raise RuntimeError(
+                "MQE rerank needs huggingface_hub for HF repo ids. "
+                "Run the harness with `--with huggingface-hub` or use local paths."
+            ) from exc
+        return Path(snapshot_download(path_or_repo))
+
+    def _load_mqe_scorer(self):
+        key = (self.mqe_encoder_dir, self.mqe_critic_dir, self.mqe_device)
+        scorer = self._mqe_scorers.get(key)
+        if scorer is not None:
+            return scorer
+
+        scripts_dir = Path(__file__).resolve().parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+
+        import torch
+        from cache_transition_embeddings import load_encoder_for_cache
+        from prepare_agenttrove_mqe import extract_action_features
+        from train_mqe_critic import build_model_classes, resolve_device
+        from train_transition_encoder import encode_texts, pad_features
+
+        device = resolve_device(self.mqe_device)
+        encoder, tokenizer, transition_head, transition_config, head_blob = load_encoder_for_cache(
+            Path(self.mqe_encoder_dir),
+            device,
+            "bfloat16" if device.startswith("cuda") else "float32",
+            None,
+        )
+        critic_dir = self._resolve_hf_or_local_dir(self.mqe_critic_dir)
+        checkpoint = torch.load(critic_dir / "best.pt", map_location="cpu")
+        config = checkpoint.get("config") or {}
+        model_cls = build_model_classes()
+        critic = model_cls(
+            int(checkpoint["input_dim"]),
+            int(config.get("hidden_dim", 512)),
+            int(config.get("latent_dim", 256)),
+            int(config.get("mrn_components", 8)),
+            float(config.get("dropout", 0.0)),
+            int(checkpoint.get("action_feature_dim", 0)),
+            bool(checkpoint.get("precomputed_state_action", True)),
+        ).to(device)
+        critic.load_state_dict(checkpoint["model_state_dict"])
+        critic.eval()
+        scorer = {
+            "torch": torch,
+            "device": device,
+            "encoder": encoder,
+            "tokenizer": tokenizer,
+            "transition_head": transition_head,
+            "critic": critic,
+            "transition_config": transition_config,
+            "feature_dim": int(head_blob["action_feature_dim"]),
+            "extract_action_features": extract_action_features,
+            "encode_texts": encode_texts,
+            "pad_features": pad_features,
+        }
+        self._mqe_scorers[key] = scorer
+        return scorer
+
+    def _compact_text(self, text: str, max_chars: int) -> str:
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        return text[-max_chars:]
+
+    def _mqe_state_text(self, messages: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for message in messages:
+            role = str(message.get("role") or "").upper()
+            content = str(message.get("content") or "")
+            if role == "TOOL":
+                try:
+                    payload = json.loads(content)
+                    content = str(payload.get("output") or payload)
+                except Exception:
+                    pass
+            parts.append(f"{role}:\n{content}")
+        return self._compact_text("\n\n---\n\n".join(parts), self.mqe_state_chars)
+
+    def _command_from_tool_call(self, tool_call: dict[str, Any]) -> str:
+        function = tool_call.get("function") or {}
+        if function.get("name") != "run_shell":
+            return ""
+        try:
+            args = json.loads(function.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            return ""
+        return str(args.get("command") or "").strip()
+
+    def _score_mqe_actions(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        instruction: str,
+        commands: list[str],
+    ) -> list[float]:
+        scorer = self._load_mqe_scorer()
+        torch = scorer["torch"]
+        device = scorer["device"]
+        encoder = scorer["encoder"]
+        tokenizer = scorer["tokenizer"]
+        transition_head = scorer["transition_head"]
+        critic = scorer["critic"]
+        encode_texts = scorer["encode_texts"]
+        pad_features = scorer["pad_features"]
+        extract_action_features = scorer["extract_action_features"]
+        transition_config = scorer["transition_config"]
+        feature_dim = int(scorer["feature_dim"])
+        max_state_tokens = int(transition_config.get("max_state_tokens", 1024))
+        max_action_tokens = int(transition_config.get("max_action_tokens", 512))
+
+        state_text = self._mqe_state_text(messages)
+        goal_text = self._compact_text(instruction, self.mqe_goal_chars)
+        action_payloads = [
+            json.dumps({"commands": [{"command": command}]}, ensure_ascii=False, sort_keys=True)
+            for command in commands
+        ]
+        features = torch.tensor(
+            [
+                pad_features(
+                    extract_action_features({"commands": [{"command": command}]}, max_chars=8192),
+                    feature_dim,
+                )
+                for command in commands
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        with torch.inference_mode():
+            state = encode_texts(
+                encoder,
+                tokenizer,
+                [state_text],
+                max_length=max_state_tokens,
+                device=device,
+                truncation_side="left",
+            )
+            goal = encode_texts(
+                encoder,
+                tokenizer,
+                [goal_text],
+                max_length=max_state_tokens,
+                device=device,
+                truncation_side="left",
+            )
+            actions = encode_texts(
+                encoder,
+                tokenizer,
+                action_payloads,
+                max_length=max_action_tokens,
+                device=device,
+                truncation_side="right",
+            )
+            repeated_state = state.repeat(len(commands), 1)
+            state_action, _ = transition_head(repeated_state, actions, features)
+            goal_z = critic.embed_goal(goal.repeat(len(commands), 1))
+            action_z = critic.embed_state_action(repeated_state, state_action, None)
+            distances = critic.qdist(action_z, goal_z)
+        return [-float(value) for value in distances.detach().cpu().tolist()]
+
+    def _select_choice_with_mqe(
+        self,
+        choices: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        instruction: str,
+        logging_dir: Path | None,
+        turn: int,
+    ) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+        parsed: list[tuple[int, dict[str, Any], str, list[dict[str, Any]]]] = []
+        for index, choice in enumerate(choices):
+            message = choice.get("message") or {}
+            content, tool_calls = self._tool_calls_from_message(message)
+            if tool_calls:
+                parsed.append((index, message, content, tool_calls))
+
+        if not parsed:
+            message = choices[0].get("message") or {}
+            content, tool_calls = self._tool_calls_from_message(message)
+            return message, content, tool_calls
+
+        first_name = ((parsed[0][3][0].get("function") or {}).get("name") if parsed[0][3] else "")
+        if first_name == "finish":
+            _, message, content, tool_calls = parsed[0]
+            return message, content, tool_calls
+
+        candidates: list[tuple[int, dict[str, Any], str, list[dict[str, Any]], str]] = []
+        seen_commands: set[str] = set()
+        for index, message, content, tool_calls in parsed:
+            command = self._command_from_tool_call(tool_calls[0]) if tool_calls else ""
+            if not command or command in seen_commands:
+                continue
+            seen_commands.add(command)
+            candidates.append((index, message, content, tool_calls, command))
+
+        if len(candidates) <= 1:
+            _, message, content, tool_calls = parsed[0]
+            return message, content, tool_calls
+
+        try:
+            scores = self._score_mqe_actions(
+                messages=messages,
+                instruction=instruction,
+                commands=[candidate[4] for candidate in candidates],
+            )
+        except Exception as exc:
+            self._write_jsonl(
+                logging_dir,
+                "mqe_rerank_errors.jsonl",
+                {"turn": turn, "error": repr(exc)},
+            )
+            _, message, content, tool_calls = parsed[0]
+            return message, content, tool_calls
+
+        best_offset = max(range(len(candidates)), key=lambda offset: scores[offset])
+        self._write_jsonl(
+            logging_dir,
+            "mqe_rerank.jsonl",
+            {
+                "turn": turn,
+                "selected_choice": candidates[best_offset][0],
+                "candidates": [
+                    {
+                        "choice": candidate[0],
+                        "score": scores[offset],
+                        "command": candidate[4],
+                    }
+                    for offset, candidate in enumerate(candidates)
+                ],
+            },
+        )
+        _, message, content, tool_calls, _ = candidates[best_offset]
+        return message, content, tool_calls
+
     def _shell_syntax_error(self, command: str) -> str | None:
         try:
             completed = subprocess.run(
@@ -569,7 +844,8 @@ class StructuredCotTerminalAgent(BaseAgent):
             pass
 
         for turn in range(1, self.max_turns + 1):
-            payload = self._make_payload(messages)
+            use_mqe_rerank = self.mqe_mode == "rerank" and self.mqe_candidates > 1
+            payload = self._make_payload(messages, rerank=use_mqe_rerank)
             self._write_jsonl(
                 logging_dir,
                 "requests.jsonl",
@@ -606,11 +882,17 @@ class StructuredCotTerminalAgent(BaseAgent):
                     failure_mode=FailureMode.UNKNOWN_AGENT_ERROR,
                 )
 
-            message = choices[0].get("message") or {}
-            tool_calls = message.get("tool_calls") or []
-            content = message.get("content") or ""
-            if not tool_calls:
-                content, tool_calls = self._fallback_tool_calls_from_content(str(content or ""))
+            if use_mqe_rerank:
+                message, content, tool_calls = self._select_choice_with_mqe(
+                    choices,
+                    messages,
+                    instruction,
+                    logging_dir,
+                    turn,
+                )
+            else:
+                message = choices[0].get("message") or {}
+                content, tool_calls = self._tool_calls_from_message(message)
             if self.grammar_mode == "dsl":
                 reasoning = self._reasoning_content(message)
                 if not DSL_REASONING_RE.fullmatch(reasoning):
