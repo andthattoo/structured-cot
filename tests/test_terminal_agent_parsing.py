@@ -155,13 +155,23 @@ def test_mqe_rerank_selects_highest_scoring_command() -> None:
     assert "echo good" in tool_calls[0]["function"]["arguments"]
 
 
-def test_thinking_context_default_preserves_full_history() -> None:
+def test_thinking_context_default_preserves_full_history(monkeypatch) -> None:
+    monkeypatch.delenv("THINKING_CONTEXT", raising=False)
     agent = StructuredCotTerminalAgent(model="test-model")
     messages = [
         {"role": "assistant", "content": "PLAN: keep\n</think>", "tool_calls": []},
     ]
 
     assert agent._messages_for_request(messages) is messages
+
+
+def test_thinking_context_can_fall_back_to_environment(monkeypatch) -> None:
+    monkeypatch.setenv("THINKING_CONTEXT", "latest")
+
+    agent = StructuredCotTerminalAgent(model="test-model")
+
+    assert agent.thinking_context == "latest"
+    assert agent._config_snapshot()["thinking_context"] == "latest"
 
 
 def test_latest_thinking_context_keeps_only_latest_assistant_thought() -> None:

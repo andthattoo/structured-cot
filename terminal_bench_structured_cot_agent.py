@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -85,6 +86,7 @@ ASSISTANT_THINK_CLOSE_RE = re.compile(
     r"\A.*?</think>\s*",
     re.DOTALL | re.IGNORECASE,
 )
+THINKING_CONTEXT_MODES = {"all", "latest", "none"}
 TOOL_NAME_RE = re.compile(
     r'"name"\s*:\s*"(?P<json_name>[A-Za-z_][\w-]*)"|'
     r'"function=(?P<quoted_function>[A-Za-z_][\w-]*)"|'
@@ -249,7 +251,10 @@ class StructuredCotTerminalAgent(BaseAgent):
         if prompt_profile not in {"auto", "default", "qwen_leo"}:
             raise ValueError("prompt_profile must be 'auto', 'default', or 'qwen_leo'")
         self.prompt_profile = prompt_profile
-        if thinking_context not in {"all", "latest", "none"}:
+        env_thinking_context = os.environ.get("THINKING_CONTEXT")
+        if thinking_context == "all" and env_thinking_context in THINKING_CONTEXT_MODES:
+            thinking_context = env_thinking_context
+        if thinking_context not in THINKING_CONTEXT_MODES:
             raise ValueError("thinking_context must be 'all', 'latest', or 'none'")
         self.thinking_context = thinking_context
         self.temperature = float(temperature)
@@ -387,6 +392,20 @@ class StructuredCotTerminalAgent(BaseAgent):
         usage = response.get("usage") or {}
         self.total_input_tokens += int(usage.get("prompt_tokens") or 0)
         self.total_output_tokens += int(usage.get("completion_tokens") or 0)
+
+    def _config_snapshot(self) -> dict[str, Any]:
+        return {
+            "base_url": self.base_url,
+            "model": self.model,
+            "grammar_mode": self.grammar_mode,
+            "tool_mode": self.tool_mode,
+            "prompt_profile": self.prompt_profile,
+            "thinking_context": self.thinking_context,
+            "mqe_mode": self.mqe_mode,
+            "mqe_candidates": self.mqe_candidates,
+            "max_turns": self.max_turns,
+            "max_tokens": self.max_tokens,
+        }
 
     def _strip_thinking_content(self, content: str, *, has_tool_calls: bool) -> str:
         stripped = ASSISTANT_THINK_BLOCK_RE.sub("", content).strip()
@@ -946,6 +965,9 @@ class StructuredCotTerminalAgent(BaseAgent):
         if logging_dir is not None:
             logging_dir.mkdir(parents=True, exist_ok=True)
             (logging_dir / "instruction.txt").write_text(instruction)
+            (logging_dir / "agent_config.json").write_text(
+                json.dumps(self._config_snapshot(), indent=2, sort_keys=True) + "\n"
+            )
 
         messages: list[dict[str, Any]] = [
             {
