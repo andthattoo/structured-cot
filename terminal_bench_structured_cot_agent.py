@@ -77,6 +77,14 @@ TOOL_CALL_BLOCK_RE = re.compile(
     r"<tool_call>\s*(.*?)(?:\s*</tool_call>|\s*\Z)",
     re.DOTALL | re.IGNORECASE,
 )
+ASSISTANT_THINK_BLOCK_RE = re.compile(
+    r"<think>\s*.*?\s*</think>",
+    re.DOTALL | re.IGNORECASE,
+)
+ASSISTANT_THINK_CLOSE_RE = re.compile(
+    r"\A.*?</think>\s*",
+    re.DOTALL | re.IGNORECASE,
+)
 TOOL_NAME_RE = re.compile(
     r'"name"\s*:\s*"(?P<json_name>[A-Za-z_][\w-]*)"|'
     r'"function=(?P<quoted_function>[A-Za-z_][\w-]*)"|'
@@ -219,6 +227,7 @@ class StructuredCotTerminalAgent(BaseAgent):
         observation_chars: int = 12000,
         tool_mode: str = "native",
         prompt_profile: str = "auto",
+        thinking_context: str = "all",
         mqe_mode: str = "none",
         mqe_encoder_dir: str = "driaforall/code-state-embedding",
         mqe_critic_dir: str = "driaforall/code-mqe-critic-actionchoice",
@@ -240,6 +249,9 @@ class StructuredCotTerminalAgent(BaseAgent):
         if prompt_profile not in {"auto", "default", "qwen_leo"}:
             raise ValueError("prompt_profile must be 'auto', 'default', or 'qwen_leo'")
         self.prompt_profile = prompt_profile
+        if thinking_context not in {"all", "latest", "none"}:
+            raise ValueError("thinking_context must be 'all', 'latest', or 'none'")
+        self.thinking_context = thinking_context
         self.temperature = float(temperature)
         self.max_tokens = int(max_tokens)
         self.max_turns = int(max_turns)
@@ -375,6 +387,35 @@ class StructuredCotTerminalAgent(BaseAgent):
         usage = response.get("usage") or {}
         self.total_input_tokens += int(usage.get("prompt_tokens") or 0)
         self.total_output_tokens += int(usage.get("completion_tokens") or 0)
+
+    def _strip_thinking_content(self, content: str, *, has_tool_calls: bool) -> str:
+        stripped = ASSISTANT_THINK_BLOCK_RE.sub("", content).strip()
+        stripped = ASSISTANT_THINK_CLOSE_RE.sub("", stripped).strip()
+        if has_tool_calls and stripped == content.strip():
+            return ""
+        return stripped
+
+    def _messages_for_request(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if self.thinking_context == "all":
+            return messages
+
+        latest_thought_index = -1
+        if self.thinking_context == "latest":
+            for index, message in enumerate(messages):
+                if message.get("role") == "assistant" and message.get("content"):
+                    latest_thought_index = index
+
+        request_messages: list[dict[str, Any]] = []
+        for index, message in enumerate(messages):
+            copied = dict(message)
+            if copied.get("role") == "assistant" and index != latest_thought_index:
+                content = str(copied.get("content") or "")
+                copied["content"] = self._strip_thinking_content(
+                    content,
+                    has_tool_calls=bool(copied.get("tool_calls")),
+                )
+            request_messages.append(copied)
+        return request_messages
 
     def _write_jsonl(
         self,
@@ -924,7 +965,8 @@ class StructuredCotTerminalAgent(BaseAgent):
 
         for turn in range(1, self.max_turns + 1):
             use_mqe_rerank = self.mqe_mode == "rerank" and self.mqe_candidates > 1
-            payload = self._make_payload(messages, rerank=use_mqe_rerank)
+            request_messages = self._messages_for_request(messages)
+            payload = self._make_payload(request_messages, rerank=use_mqe_rerank)
             self._write_jsonl(
                 logging_dir,
                 "requests.jsonl",
@@ -964,7 +1006,7 @@ class StructuredCotTerminalAgent(BaseAgent):
             if use_mqe_rerank:
                 message, content, tool_calls = self._select_choice_with_mqe(
                     choices,
-                    messages,
+                    request_messages,
                     instruction,
                     logging_dir,
                     turn,

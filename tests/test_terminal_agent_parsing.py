@@ -153,3 +153,70 @@ def test_mqe_rerank_selects_highest_scoring_command() -> None:
     _, _, tool_calls = agent._select_choice_with_mqe(choices, [], "task", None, 1)
 
     assert "echo good" in tool_calls[0]["function"]["arguments"]
+
+
+def test_thinking_context_default_preserves_full_history() -> None:
+    agent = StructuredCotTerminalAgent(model="test-model")
+    messages = [
+        {"role": "assistant", "content": "PLAN: keep\n</think>", "tool_calls": []},
+    ]
+
+    assert agent._messages_for_request(messages) is messages
+
+
+def test_latest_thinking_context_keeps_only_latest_assistant_thought() -> None:
+    agent = StructuredCotTerminalAgent(model="test-model", thinking_context="latest")
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": "PLAN: old\nSTATE: old\n</think>",
+            "tool_calls": [{"id": "old", "function": {"name": "run_shell", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "old", "content": "{}"},
+        {
+            "role": "assistant",
+            "content": "PLAN: current\nSTATE: current\n</think>",
+            "tool_calls": [{"id": "current", "function": {"name": "run_shell", "arguments": "{}"}}],
+        },
+    ]
+
+    request_messages = agent._messages_for_request(messages)
+
+    assert request_messages is not messages
+    assert request_messages[2]["content"] == ""
+    assert request_messages[2]["tool_calls"] == messages[2]["tool_calls"]
+    assert "PLAN: current" in request_messages[4]["content"]
+    assert messages[2]["content"].startswith("PLAN: old")
+
+
+def test_none_thinking_context_strips_all_assistant_thoughts() -> None:
+    agent = StructuredCotTerminalAgent(model="test-model", thinking_context="none")
+    messages = [
+        {
+            "role": "assistant",
+            "content": "<think>\nPLAN: first\n</think>",
+            "tool_calls": [{"id": "first", "function": {"name": "run_shell", "arguments": "{}"}}],
+        },
+        {
+            "role": "assistant",
+            "content": "PLAN: second\nSTATE: second\n</think>",
+            "tool_calls": [{"id": "second", "function": {"name": "run_shell", "arguments": "{}"}}],
+        },
+    ]
+
+    request_messages = agent._messages_for_request(messages)
+
+    assert [message["content"] for message in request_messages] == ["", ""]
+
+
+def test_strip_thinking_content_keeps_visible_non_thought_text() -> None:
+    agent = StructuredCotTerminalAgent(model="test-model", thinking_context="latest")
+
+    content = agent._strip_thinking_content(
+        "<think>\nPLAN: hidden\n</think>\nVisible answer",
+        has_tool_calls=False,
+    )
+
+    assert content == "Visible answer"

@@ -12,6 +12,8 @@
 #   GRAMMAR_MODE=dsl ./scripts/run_terminal_bench_smoke.sh        # PLAN/STATE/RISK/NEXT
 #   TOOL_MODE=qwen_xml GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
 #       # Qwen Leo compact-DSL prompt + Qwen XML tool calls, no server grammar
+#   TOOL_MODE=qwen_xml THINKING_CONTEXT=latest ./scripts/run_terminal_bench_smoke.sh
+#       # Preserve only the latest assistant thinking block in chat context
 #
 # Run the full dataset by omitting --task-id:
 #   TASK_ID=all GRAMMAR_MODE=none ./scripts/run_terminal_bench_smoke.sh
@@ -28,6 +30,7 @@ MODEL="${MODEL:-ggml-org/Qwen3.6-27B-GGUF}"
 GRAMMAR_MODE="${GRAMMAR_MODE:-none}"
 TOOL_MODE="${TOOL_MODE:-native}"
 PROMPT_PROFILE="${PROMPT_PROFILE:-auto}"
+THINKING_CONTEXT="${THINKING_CONTEXT:-all}"
 MQE_MODE="${MQE_MODE:-none}"
 MQE_ENCODER_DIR="${MQE_ENCODER_DIR:-driaforall/code-state-embedding}"
 MQE_CRITIC_DIR="${MQE_CRITIC_DIR:-driaforall/code-mqe-critic-actionchoice}"
@@ -77,6 +80,7 @@ echo "  model        = ${MODEL}"
 echo "  grammar_mode = ${GRAMMAR_MODE}"
 echo "  tool_mode    = ${TOOL_MODE}"
 echo "  prompt       = ${PROMPT_PROFILE}"
+echo "  thinking_ctx = ${THINKING_CONTEXT}"
 echo "  mqe_mode     = ${MQE_MODE}"
 if [ "${MQE_MODE}" != "none" ]; then
     echo "  mqe_encoder  = ${MQE_ENCODER_DIR}"
@@ -108,6 +112,7 @@ PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}" "${TB_BIN}" run \
     --agent-kwarg "grammar_mode=${GRAMMAR_MODE}" \
     --agent-kwarg "tool_mode=${TOOL_MODE}" \
     --agent-kwarg "prompt_profile=${PROMPT_PROFILE}" \
+    --agent-kwarg "thinking_context=${THINKING_CONTEXT}" \
     --agent-kwarg "mqe_mode=${MQE_MODE}" \
     --agent-kwarg "mqe_encoder_dir=${MQE_ENCODER_DIR}" \
     --agent-kwarg "mqe_critic_dir=${MQE_CRITIC_DIR}" \
