@@ -69,6 +69,50 @@ STOPWORDS = {
     "work",
     "years",
 }
+DOMAIN_KEYWORDS = {
+    "finance": (
+        "budget variance reports",
+        {"finance", "financial", "budget", "forecasting", "cash", "board", "revenue", "expense", "accounting"},
+    ),
+    "civil engineering": (
+        "construction material quantities and inspection notes",
+        {"civil", "engineer", "engineering", "infrastructure", "construction", "revit", "material", "project"},
+    ),
+    "inventory": (
+        "inventory counts and reorder levels",
+        {"inventory", "retail", "cashier", "pantry", "reorder", "stock", "items"},
+    ),
+    "events": (
+        "event schedules, volunteer shifts, and task checklists",
+        {"event", "planner", "volunteer", "schedule", "festival", "community"},
+    ),
+    "arts": (
+        "artwork inventory, exhibition planning, and artist notes",
+        {"art", "arts", "artist", "watercolor", "exhibition", "gallery", "curating", "museum"},
+    ),
+    "research": (
+        "research notes, citations, and archival records",
+        {"research", "archival", "archives", "literary", "history", "humanities", "translation", "genealogy"},
+    ),
+    "marine science": (
+        "species observations and simple ecosystem records",
+        {"marine", "ecosystem", "fish", "plankton", "biology", "environmental"},
+    ),
+    "cooking": (
+        "recipe ingredients, pantry inventory, and meal ideas",
+        {"cooking", "recipe", "recipes", "culinary", "pantry", "ingredients", "spices"},
+    ),
+    "home maintenance": (
+        "home maintenance tasks, costs, and reminders",
+        {"repair", "maintenance", "plumbing", "electrical", "carpentry", "renovation", "household"},
+    ),
+}
+GENERIC_FOCI = (
+    "CSV records and summary reports",
+    "local checklists and recurring reminders",
+    "small project notes and status updates",
+    "simple logs with dates, categories, and totals",
+)
 
 
 def progress(iterable, **kwargs):
@@ -382,7 +426,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
 def deterministic_task(persona: PersonaRecord, *, intents: list[str], languages: list[str], index: int) -> dict[str, Any]:
     brief = persona_brief(persona)
     occupation = human_occupation(brief.get("occupation"))
-    focus = persona_focus(brief, occupation=occupation)
+    focus = persona_focus(brief, occupation=occupation, index=index)
     intent = intents[index % len(intents)]
     language = languages[index % len(languages)]
     needs_workspace = intent in WORKSPACE_INTENTS
@@ -409,10 +453,11 @@ def deterministic_task(persona: PersonaRecord, *, intents: list[str], languages:
         commands = ["python3 -m pytest -q"] if language == "python" else []
     else:
         subject = f" as a {occupation}" if occupation else ""
-        language_part = "" if language == "none" else f" in {language}"
+        language_part = "" if language in {"none", "mixed"} else f" in {language}"
+        script_phrase = f" {language}" if language not in {"none", "mixed"} else ""
         if intent == "debug":
             request = (
-                f"I need help debugging a small{language_part} script{subject} that processes {focus}. "
+                f"I need help debugging a small{script_phrase} script{subject} that processes {focus}. "
                 "Give me a practical debugging plan, likely failure points, and a tiny example of the kind of test I should add."
             )
         elif intent == "review":
@@ -463,35 +508,8 @@ def first_sentence(text: str, *, limit: int) -> str:
     return text[:limit].rstrip(" ,.;:")
 
 
-def keyword_focus(text: str, *, occupation: str | None = None) -> str:
-    text = text.replace("_", " ")
-    candidates = [
-        token.lower()
-        for token in re.findall(r"[A-Za-z][A-Za-z-]{3,}", text)
-        if token.lower() not in STOPWORDS and not token[:1].isupper()
-    ]
-    ordered: list[str] = []
-    for token in candidates:
-        token = token.strip("-")
-        if token and token not in ordered:
-            ordered.append(token)
-    if occupation:
-        for token in reversed(occupation.lower().split()):
-            if not token:
-                continue
-            if token in ordered:
-                ordered.remove(token)
-            ordered.insert(0, token)
-    if not ordered:
-        return "records and recurring tasks"
-    if len(ordered) == 1:
-        return ordered[0]
-    if len(ordered) == 2:
-        return f"{ordered[0]} and {ordered[1]}"
-    return f"{ordered[0]}, {ordered[1]}, and {ordered[2]}"
-
-
-def persona_focus(brief: dict[str, Any], *, occupation: str | None = None) -> str:
+def persona_text_blob(brief: dict[str, Any], *, occupation: str | None = None) -> str:
+    parts = [occupation or ""]
     for key in (
         "skills_and_expertise",
         "career_goals_and_ambitions",
@@ -501,8 +519,21 @@ def persona_focus(brief: dict[str, Any], *, occupation: str | None = None) -> st
     ):
         value = brief.get(key)
         if isinstance(value, str) and value.strip():
-            return keyword_focus(first_sentence(value, limit=320), occupation=occupation)
-    return "organizing a small local workflow"
+            parts.append(first_sentence(value, limit=500))
+    return " ".join(parts).lower().replace("_", " ")
+
+
+def persona_focus(brief: dict[str, Any], *, occupation: str | None = None, index: int = 0) -> str:
+    blob = persona_text_blob(brief, occupation=occupation)
+    matched: list[tuple[str, str, int]] = []
+    for domain, (focus, keywords) in DOMAIN_KEYWORDS.items():
+        score = sum(1 for keyword in keywords if keyword in blob)
+        if score:
+            matched.append((domain, focus, score))
+    if matched:
+        matched.sort(key=lambda item: (-item[2], item[0]))
+        return matched[0][1]
+    return GENERIC_FOCI[index % len(GENERIC_FOCI)]
 
 
 def normalize_generated_task(payload: dict[str, Any], *, intents: list[str], languages: list[str]) -> dict[str, Any]:
@@ -554,6 +585,8 @@ def generated_task_quality_errors(task: dict[str, Any]) -> list[str]:
         errors.append("language=none tasks cannot have verify_commands")
     if needs_workspace and not task.get("expected_artifacts"):
         errors.append("workspace tasks should name expected_artifacts")
+    if re.search(r"\b(processes|handles|around|tracking) [a-z]+, [a-z]+, and [a-z]+\b", lowered):
+        errors.append("user_request has low-signal keyword triple")
     return errors
 
 

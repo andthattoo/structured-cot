@@ -203,7 +203,7 @@ def test_deterministic_task_avoids_raw_persona_dump_for_not_in_workforce() -> No
     assert not generate_persona_pi_tasks.generated_task_quality_errors(task)
 
 
-def test_persona_focus_extracts_short_keywords_not_biography() -> None:
+def test_persona_focus_maps_biography_to_domain_phrase() -> None:
     focus = generate_persona_pi_tasks.persona_focus(
         {
             "skills_and_expertise": (
@@ -214,9 +214,24 @@ def test_persona_focus_extracts_short_keywords_not_biography() -> None:
         occupation="civil engineer",
     )
 
-    assert focus == "civil, engineer, and licensed"
+    assert focus == "construction material quantities and inspection notes"
     assert "Yang" not in focus
     assert "Skubis" not in focus
+
+
+def test_quality_gate_rejects_low_signal_keyword_triples() -> None:
+    errors = generate_persona_pi_tasks.generated_task_quality_errors(
+        {
+            "intent": "debug",
+            "language": "typescript",
+            "needs_workspace": False,
+            "user_request": "I need help debugging a small typescript script that processes arts, humanities, and equipped.",
+            "expected_artifacts": [],
+            "verify_commands": [],
+        }
+    )
+
+    assert any("low-signal keyword triple" in error for error in errors)
 
 
 def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypatch) -> None:
