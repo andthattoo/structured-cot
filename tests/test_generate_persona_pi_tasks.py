@@ -62,6 +62,57 @@ def test_extract_json_object_accepts_fenced_json() -> None:
     assert payload["language"] == "python"
 
 
+def test_extract_json_object_rejects_none() -> None:
+    try:
+        generate_persona_pi_tasks.extract_json_object(None)  # type: ignore[arg-type]
+    except ValueError as exc:
+        assert "must be a string" in str(exc)
+        pass
+    else:
+        raise AssertionError("None content should fail before normalization")
+
+
+def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypatch) -> None:
+    persona = generate_persona_pi_tasks.PersonaRecord(persona_id="abc123", row=persona_row())
+
+    def fake_openrouter_chat(**kwargs):
+        raise RuntimeError("empty message")
+
+    monkeypatch.setattr(generate_persona_pi_tasks, "openrouter_chat", fake_openrouter_chat)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+
+    args = type(
+        "Args",
+        (),
+        {
+            "intents": "build",
+            "languages": "python",
+            "provider": "openrouter",
+            "dry_run": False,
+            "api_key_env": "OPENROUTER_API_KEY",
+            "retries": 0,
+            "fallback_on_error": True,
+            "model": "test-model",
+            "temperature": 0.1,
+            "max_tokens": 100,
+            "no_json_mode": False,
+            "request_timeout_sec": 1.0,
+            "retry_sleep_sec": 0.0,
+            "start_index": 0,
+            "root_dir": tmp_path,
+            "source": "test",
+        },
+    )()
+
+    rows = generate_persona_pi_tasks.generate_rows(args, [persona])
+
+    assert len(rows) == 1
+    assert rows[0]["intent"] == "build"
+    assert rows[0]["language"] == "python"
+    assert rows[0]["task_generation_fallback"] is True
+    assert "empty message" in rows[0]["task_generation_error"]
+
+
 def test_task_row_is_pi_compatible_and_empty_workspace_prompt(tmp_path: Path) -> None:
     persona = generate_persona_pi_tasks.PersonaRecord(persona_id="abc123", row=persona_row())
     generated = {

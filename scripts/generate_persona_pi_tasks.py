@@ -237,10 +237,18 @@ def openrouter_chat(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
         raise RuntimeError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
-    return payload["choices"][0]["message"]["content"]
+    message = payload["choices"][0].get("message") or {}
+    content = message.get("content")
+    if content is None:
+        content = message.get("reasoning")
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError(f"OpenRouter returned empty message content: {json.dumps(payload)[:1000]}")
+    return content
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
+    if not isinstance(text, str):
+        raise ValueError("LLM response text must be a string")
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
@@ -301,7 +309,7 @@ def normalize_generated_task(payload: dict[str, Any], *, intents: list[str], lan
     user_request = str(payload.get("user_request") or "").strip()
     if not user_request:
         raise ValueError("generated task missing user_request")
-    return {
+    normalized = {
         "title": str(payload.get("title") or f"{intent} task").strip(),
         "intent": intent,
         "language": language,
@@ -311,6 +319,9 @@ def normalize_generated_task(payload: dict[str, Any], *, intents: list[str], lan
         "verify_commands": list(payload.get("verify_commands") or []),
         "difficulty": str(payload.get("difficulty") or "medium"),
     }
+    if payload.get("generation_error"):
+        normalized["generation_error"] = str(payload["generation_error"])
+    return normalized
 
 
 def pi_prompt(task: dict[str, Any]) -> str:
@@ -363,6 +374,8 @@ def task_row(
         "verify_commands": generated["verify_commands"],
         "difficulty": generated["difficulty"],
         "generator_model": generator_model,
+        "task_generation_fallback": bool(generated.get("generation_error")),
+        "task_generation_error": generated.get("generation_error"),
         "verifiable": bool(generated["verify_commands"]),
     }
 
@@ -414,6 +427,10 @@ def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> li
                 except Exception as exc:  # noqa: BLE001 - report retryable API/parsing errors.
                     last_error = exc
                     if attempt >= args.retries:
+                        if args.fallback_on_error:
+                            generated = deterministic_task(persona, intents=intents, languages=languages, index=index)
+                            generated["generation_error"] = repr(last_error)
+                            break
                         raise
                     time.sleep(args.retry_sleep_sec * (attempt + 1))
             else:
@@ -472,6 +489,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--request-timeout-sec", type=float, default=120.0)
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--retry-sleep-sec", type=float, default=2.0)
+    parser.set_defaults(fallback_on_error=True)
+    parser.add_argument(
+        "--fallback-on-error",
+        dest="fallback_on_error",
+        action="store_true",
+        help="Emit deterministic local tasks when LLM generation fails after retries. This is the default.",
+    )
+    parser.add_argument(
+        "--no-fallback-on-error",
+        dest="fallback_on_error",
+        action="store_false",
+        help="Fail the whole run if LLM generation fails after retries.",
+    )
     parser.add_argument("--no-json-mode", action="store_true")
     parser.add_argument("--intents", default=DEFAULT_INTENTS)
     parser.add_argument("--languages", default=DEFAULT_LANGUAGES)
