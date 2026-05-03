@@ -216,6 +216,29 @@ session JSONL from the captured RPC event stream:
 python3 scripts/repair_pi_trace_sessions.py data/pi_traces/public_repo_sweep
 ```
 
+Upload a completed run to an append-only Hugging Face dataset repo:
+
+```bash
+export HF_TOKEN=hf_...
+DATASET_REPO=andthattoo/etpi-pi-traces
+
+python3 scripts/upload_pi_trace_dataset.py \
+  --trace-dir data/pi_traces/public_repo_sweep_flight \
+  --repo-id "$DATASET_REPO" \
+  --run-id public_repo_sweep_flight \
+  --dry-run
+
+python3 scripts/upload_pi_trace_dataset.py \
+  --trace-dir data/pi_traces/public_repo_sweep_flight \
+  --repo-id "$DATASET_REPO" \
+  --run-id public_repo_sweep_flight
+```
+
+Each upload adds `runs/<run_id>/...` plus `index/<run_id>.jsonl`, so future
+runs can be appended without rewriting existing trace shards. Use
+`--include-rpc --include-stderr` when you want the raw RPC event stream and
+stderr logs in the dataset too.
+
 ### Start the server
 
 ```bash
