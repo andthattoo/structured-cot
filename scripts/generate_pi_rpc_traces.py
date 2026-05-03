@@ -196,6 +196,119 @@ def newest_created_session_file(session_dir: Path, before: set[Path], started_mo
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def timestamp_from_message(message: dict[str, Any], fallback: str) -> str:
+    raw = message.get("timestamp")
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(raw / 1000.0, timezone.utc).isoformat().replace("+00:00", "Z")
+    return fallback
+
+
+def reconstruct_session_file(
+    rpc_events_file: Path,
+    session_dir: Path,
+    *,
+    task_slug: str,
+    cwd: str,
+    provider: str,
+    model: str,
+    thinking_level: str | None,
+    session_name: str,
+    started_at: str,
+) -> Path | None:
+    """Write a Pi-like session JSONL from RPC events when Pi does not persist one."""
+
+    if not rpc_events_file.exists():
+        return None
+
+    records: list[dict[str, Any]] = [
+        {
+            "type": "session",
+            "version": 3,
+            "id": f"reconstructed-{task_slug}",
+            "timestamp": started_at,
+            "cwd": cwd,
+        },
+        {
+            "type": "model_change",
+            "id": f"{task_slug}-model",
+            "parentId": None,
+            "timestamp": started_at,
+            "provider": provider,
+            "modelId": model,
+        },
+    ]
+    parent_id = f"{task_slug}-model"
+    if thinking_level:
+        records.append(
+            {
+                "type": "thinking_level_change",
+                "id": f"{task_slug}-thinking",
+                "parentId": parent_id,
+                "timestamp": started_at,
+                "thinkingLevel": thinking_level,
+            }
+        )
+        parent_id = f"{task_slug}-thinking"
+    records.append(
+        {
+            "type": "session_info",
+            "id": f"{task_slug}-session-info",
+            "parentId": parent_id,
+            "timestamp": started_at,
+            "name": session_name,
+        }
+    )
+    parent_id = f"{task_slug}-session-info"
+    seen_messages: set[str] = set()
+    message_count = 0
+
+    with rpc_events_file.open() as f:
+        for line_no, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") != "message_end":
+                continue
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role not in {"user", "assistant", "toolResult"}:
+                continue
+            dedupe_key = json.dumps(message, sort_keys=True, ensure_ascii=False)
+            if dedupe_key in seen_messages:
+                continue
+            seen_messages.add(dedupe_key)
+            message_count += 1
+            message_id = str(event.get("id") or f"{task_slug}-message-{line_no}")
+            records.append(
+                {
+                    "type": "message",
+                    "id": message_id,
+                    "parentId": parent_id,
+                    "timestamp": timestamp_from_message(message, started_at),
+                    "message": message,
+                }
+            )
+            parent_id = message_id
+
+    if message_count == 0:
+        return None
+
+    reconstructed_dir = session_dir / "reconstructed"
+    reconstructed_dir.mkdir(parents=True, exist_ok=True)
+    out_path = reconstructed_dir / f"{task_slug}.jsonl"
+    with out_path.open("w") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return out_path.resolve()
+
+
 def write_rpc(stdin, payload: dict[str, Any]) -> None:
     stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
     stdin.flush()
@@ -347,6 +460,18 @@ def run_one_task(task: TaskSpec, args: argparse.Namespace, out_dir: Path) -> Tas
 
     exit_code = terminate_process(proc)
     session_file = newest_created_session_file(session_dir, before_sessions, started_monotonic)
+    if session_file is None and agent_end_seen:
+        session_file = reconstruct_session_file(
+            rpc_events_file,
+            session_dir,
+            task_slug=task_slug,
+            cwd=str(cwd),
+            provider=args.provider,
+            model=args.model,
+            thinking_level=thinking_level,
+            session_name=session_name,
+            started_at=started_at,
+        )
     ended_at = utc_now()
     elapsed = time.monotonic() - started_monotonic
     status = "ok" if agent_end_seen and error is None else "error"

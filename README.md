@@ -209,6 +209,13 @@ Summarize generated sessions:
 python3 scripts/summarize_pi_trace.py --show-tools data/pi_traces/smoke/sessions/*.jsonl
 ```
 
+If Pi finishes episodes but the manifest has `session_file: null`, backfill
+session JSONL from the captured RPC event stream:
+
+```bash
+python3 scripts/repair_pi_trace_sessions.py data/pi_traces/public_repo_sweep
+```
+
 ### Start the server
 
 ```bash

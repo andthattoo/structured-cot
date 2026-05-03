@@ -17,6 +17,14 @@ assert SPEC.loader is not None
 sys.modules[SPEC.name] = generate_pi_rpc_traces
 SPEC.loader.exec_module(generate_pi_rpc_traces)
 
+REPAIR_SCRIPT_PATH = ROOT / "scripts" / "repair_pi_trace_sessions.py"
+REPAIR_SPEC = importlib.util.spec_from_file_location("repair_pi_trace_sessions", REPAIR_SCRIPT_PATH)
+assert REPAIR_SPEC is not None
+repair_pi_trace_sessions = importlib.util.module_from_spec(REPAIR_SPEC)
+assert REPAIR_SPEC.loader is not None
+sys.modules[REPAIR_SPEC.name] = repair_pi_trace_sessions
+REPAIR_SPEC.loader.exec_module(repair_pi_trace_sessions)
+
 
 def test_load_tasks_accepts_prompt_aliases_and_preserves_metadata(tmp_path: Path) -> None:
     tasks_path = tmp_path / "tasks.jsonl"
@@ -137,3 +145,110 @@ def test_event_error_message_catches_failed_response() -> None:
     event = {"type": "response", "success": False, "error": "bad command"}
 
     assert "bad command" in generate_pi_rpc_traces.event_error_message(event)
+
+
+def test_reconstruct_session_file_from_rpc_message_events(tmp_path: Path) -> None:
+    events_path = tmp_path / "rpc-events" / "task.jsonl"
+    events_path.parent.mkdir()
+    events = [
+        {
+            "type": "message_end",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Read repo"}],
+                "timestamp": 1777802277996,
+            },
+        },
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done"}],
+                "stopReason": "stop",
+                "timestamp": 1777802278030,
+            },
+        },
+        {"type": "agent_end"},
+    ]
+    events_path.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+
+    session_path = generate_pi_rpc_traces.reconstruct_session_file(
+        events_path,
+        tmp_path / "sessions",
+        task_slug="task",
+        cwd="/repo",
+        provider="openrouter",
+        model="qwen/qwen3.5-27b",
+        thinking_level="medium",
+        session_name="etpi_task",
+        started_at="2026-05-03T10:00:00+00:00",
+    )
+
+    assert session_path is not None
+    records = [json.loads(line) for line in session_path.read_text().splitlines()]
+    assert [record["type"] for record in records] == [
+        "session",
+        "model_change",
+        "thinking_level_change",
+        "session_info",
+        "message",
+        "message",
+    ]
+    assert records[0]["cwd"] == "/repo"
+    assert records[2]["thinkingLevel"] == "medium"
+    assert [record["message"]["role"] for record in records if record["type"] == "message"] == [
+        "user",
+        "assistant",
+    ]
+
+
+def test_repair_rows_backfills_session_file(tmp_path: Path) -> None:
+    trace_dir = tmp_path / "trace"
+    events_path = trace_dir / "rpc-events" / "task.jsonl"
+    events_path.parent.mkdir(parents=True)
+    events_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "message_end",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "Read repo"}],
+                            "timestamp": 1777802277996,
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "message_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "Done"}],
+                            "stopReason": "stop",
+                            "timestamp": 1777802278030,
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    rows = [
+        {
+            "task_id": "task",
+            "status": "ok",
+            "cwd": "/repo",
+            "session_file": None,
+            "rpc_events_file": str(events_path),
+            "started_at": "2026-05-03T10:00:00+00:00",
+            "pi_command": ["pi", "--provider", "openrouter", "--model", "qwen/qwen3.5-27b"],
+            "task": {"thinking_level": "minimal"},
+        }
+    ]
+
+    repaired = repair_pi_trace_sessions.repair_rows(rows, trace_dir=trace_dir, dry_run=False)
+
+    assert repaired == 1
+    assert rows[0]["session_file"]
+    assert Path(rows[0]["session_file"]).exists()
