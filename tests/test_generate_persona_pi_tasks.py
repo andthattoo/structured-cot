@@ -72,6 +72,93 @@ def test_extract_json_object_rejects_none() -> None:
         raise AssertionError("None content should fail before normalization")
 
 
+def test_task_response_schema_is_strict_and_enum_bounded() -> None:
+    schema = generate_persona_pi_tasks.task_response_schema(
+        intents=["build", "review"],
+        languages=["python", "none"],
+    )
+
+    assert schema["additionalProperties"] is False
+    assert "user_request" in schema["required"]
+    assert schema["properties"]["intent"]["enum"] == ["build", "review"]
+    assert schema["properties"]["language"]["enum"] == ["python", "none"]
+
+
+def test_openrouter_chat_sends_structured_output_schema(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"choices": [{"message": {"content": "{\"title\":\"ok\"}"}}]}).encode()
+
+    def fake_urlopen(request, *, timeout):
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr(generate_persona_pi_tasks.urllib.request, "urlopen", fake_urlopen)
+
+    schema = generate_persona_pi_tasks.task_response_schema(
+        intents=["build"],
+        languages=["python"],
+    )
+    content = generate_persona_pi_tasks.openrouter_chat(
+        model="test-model",
+        messages=[{"role": "user", "content": "make task"}],
+        api_key="sk-test",
+        temperature=0.1,
+        max_tokens=100,
+        json_mode=True,
+        structured_schema=schema,
+        timeout_sec=12.0,
+    )
+
+    assert content == "{\"title\":\"ok\"}"
+    assert captured["timeout"] == 12.0
+    assert captured["body"]["response_format"]["type"] == "json_schema"
+    assert captured["body"]["response_format"]["json_schema"]["strict"] is True
+    assert captured["body"]["response_format"]["json_schema"]["schema"] == schema
+
+
+def test_openrouter_chat_can_fall_back_to_json_object_mode(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"choices": [{"message": {"content": "{\"title\":\"ok\"}"}}]}).encode()
+
+    def fake_urlopen(request, *, timeout):
+        captured["body"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr(generate_persona_pi_tasks.urllib.request, "urlopen", fake_urlopen)
+
+    generate_persona_pi_tasks.openrouter_chat(
+        model="test-model",
+        messages=[{"role": "user", "content": "make task"}],
+        api_key="sk-test",
+        temperature=0.1,
+        max_tokens=100,
+        json_mode=True,
+        structured_schema=None,
+        timeout_sec=12.0,
+    )
+
+    assert captured["body"]["response_format"] == {"type": "json_object"}
+
+
 def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypatch) -> None:
     persona = generate_persona_pi_tasks.PersonaRecord(persona_id="abc123", row=persona_row())
 
@@ -96,6 +183,7 @@ def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypa
             "temperature": 0.1,
             "max_tokens": 100,
             "no_json_mode": False,
+            "structured_output": True,
             "request_timeout_sec": 1.0,
             "retry_sleep_sec": 0.0,
             "start_index": 0,

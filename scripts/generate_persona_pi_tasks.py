@@ -204,6 +204,62 @@ def generation_messages(
     ]
 
 
+def task_response_schema(*, intents: list[str], languages: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "title",
+            "intent",
+            "language",
+            "needs_workspace",
+            "user_request",
+            "expected_artifacts",
+            "verify_commands",
+            "difficulty",
+        ],
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "A short, human-readable title for the generated task.",
+            },
+            "intent": {
+                "type": "string",
+                "enum": intents,
+                "description": "The task category.",
+            },
+            "language": {
+                "type": "string",
+                "enum": languages,
+                "description": "The primary programming language or none for advice-only tasks.",
+            },
+            "needs_workspace": {
+                "type": "boolean",
+                "description": "True when the coding agent should create or edit files in an empty workspace.",
+            },
+            "user_request": {
+                "type": "string",
+                "description": "The exact single user message to send to the coding agent.",
+            },
+            "expected_artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Filenames or directories expected from build/edit tasks, otherwise an empty list.",
+            },
+            "verify_commands": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Simple local commands that can smoke-test the result, otherwise an empty list.",
+            },
+            "difficulty": {
+                "type": "string",
+                "enum": ["easy", "medium"],
+                "description": "Keep generated tasks modest enough for one Pi episode.",
+            },
+        },
+    }
+
+
 def openrouter_chat(
     *,
     model: str,
@@ -212,6 +268,7 @@ def openrouter_chat(
     temperature: float,
     max_tokens: int,
     json_mode: bool,
+    structured_schema: dict[str, Any] | None,
     timeout_sec: float,
 ) -> str:
     body: dict[str, Any] = {
@@ -220,7 +277,16 @@ def openrouter_chat(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    if json_mode:
+    if structured_schema is not None:
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "persona_coding_task",
+                "strict": True,
+                "schema": structured_schema,
+            },
+        }
+    elif json_mode:
         body["response_format"] = {"type": "json_object"}
     req = urllib.request.Request(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -399,6 +465,13 @@ def create_workspaces(rows: list[dict[str, Any]]) -> int:
 def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> list[dict[str, Any]]:
     intents = split_csv(args.intents)
     languages = split_csv(args.languages)
+    if not intents:
+        raise ValueError("--intents must include at least one value")
+    if not languages:
+        raise ValueError("--languages must include at least one value")
+    structured_schema = None
+    if not args.no_json_mode and args.structured_output:
+        structured_schema = task_response_schema(intents=intents, languages=languages)
     rows: list[dict[str, Any]] = []
     api_key = os.environ.get(args.api_key_env)
     if args.provider == "openrouter" and not args.dry_run and not api_key:
@@ -420,6 +493,7 @@ def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> li
                         temperature=args.temperature,
                         max_tokens=args.max_tokens,
                         json_mode=not args.no_json_mode,
+                        structured_schema=structured_schema,
                         timeout_sec=args.request_timeout_sec,
                     )
                     generated = normalize_generated_task(extract_json_object(content), intents=intents, languages=languages)
@@ -489,6 +563,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--request-timeout-sec", type=float, default=120.0)
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--retry-sleep-sec", type=float, default=2.0)
+    parser.set_defaults(structured_output=True)
+    parser.add_argument(
+        "--structured-output",
+        dest="structured_output",
+        action="store_true",
+        help="Use OpenRouter response_format=json_schema strict structured output. This is the default.",
+    )
+    parser.add_argument(
+        "--no-structured-output",
+        dest="structured_output",
+        action="store_false",
+        help="Use plain JSON mode instead of strict JSON Schema mode.",
+    )
     parser.set_defaults(fallback_on_error=True)
     parser.add_argument(
         "--fallback-on-error",

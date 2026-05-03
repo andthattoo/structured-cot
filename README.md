@@ -184,6 +184,11 @@ uv run --with datasets --with huggingface-hub --with tqdm python scripts/generat
   --model nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
 ```
 
+The persona generator uses OpenRouter strict structured outputs
+(`response_format: json_schema`) by default, with deterministic fallback tasks
+after API/parsing retries. If a provider rejects schema mode, rerun with
+`--no-structured-output` to use plain JSON mode.
+
 Run the generated tasks with only stronger Pi thinking settings:
 
 ```bash
