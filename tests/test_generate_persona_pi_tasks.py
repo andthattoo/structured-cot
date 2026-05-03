@@ -159,6 +159,48 @@ def test_openrouter_chat_can_fall_back_to_json_object_mode(monkeypatch) -> None:
     assert captured["body"]["response_format"] == {"type": "json_object"}
 
 
+def test_quality_gate_rejects_persona_dump_template() -> None:
+    errors = generate_persona_pi_tasks.generated_task_quality_errors(
+        {
+            "intent": "automation",
+            "language": "none",
+            "needs_workspace": True,
+            "user_request": "I work as a not_in_workforce and need a small none tool related to a pasted biography.",
+            "expected_artifacts": [],
+            "verify_commands": [],
+        }
+    )
+
+    assert errors
+    assert any("low-quality phrase" in error for error in errors)
+    assert any("language=none" in error for error in errors)
+
+
+def test_deterministic_task_avoids_raw_persona_dump_for_not_in_workforce() -> None:
+    persona = generate_persona_pi_tasks.PersonaRecord(
+        persona_id="abc123",
+        row={
+            **persona_row(),
+            "occupation": "not_in_workforce",
+            "skills_and_expertise": "Lifelong humanities research, oral-history interviews, and community workshop planning.",
+        },
+    )
+
+    task = generate_persona_pi_tasks.deterministic_task(
+        persona,
+        intents=["build"],
+        languages=["none", "python"],
+        index=0,
+    )
+
+    assert task["needs_workspace"] is True
+    assert task["language"] == "python"
+    assert "not_in_workforce" not in task["user_request"]
+    assert "related to" not in task["user_request"]
+    assert "none tool" not in task["user_request"]
+    assert not generate_persona_pi_tasks.generated_task_quality_errors(task)
+
+
 def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypatch) -> None:
     persona = generate_persona_pi_tasks.PersonaRecord(persona_id="abc123", row=persona_row())
 

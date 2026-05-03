@@ -27,6 +27,17 @@ DEFAULT_PROVIDER = "openrouter"
 DEFAULT_INTENTS = "build,how_to,debug,design,automation,review,data_transform"
 DEFAULT_LANGUAGES = "python,javascript,typescript,cpp,shell,mixed,none"
 TASK_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+WORKSPACE_INTENTS = {"build", "automation", "data_transform"}
+BAD_REQUEST_PHRASES = (
+    "i work as a not_in_workforce",
+    "related to ",
+    "small none tool",
+    "for a none task",
+    "concrete coding-agent guidance for a",
+    "professional_persona",
+    "skills_and_expertise",
+    "career_goals_and_ambitions",
+)
 
 
 def progress(iterable, **kwargs):
@@ -196,6 +207,11 @@ def generation_messages(
             "If needs_workspace is false, ask for concrete advice, code snippets, a debugging plan, or a review.",
             "Avoid huge projects, network services, credentials, scraping, CUDA/GPU, mobile apps, or deployment.",
             "Prefer Python, JavaScript/TypeScript, shell, or small C++ when code is needed.",
+            "Do not paste the persona biography into the user request.",
+            "Do not use placeholder phrasing like 'related to', occupation codes like 'not_in_workforce', or 'none tool'.",
+            "If language is none, needs_workspace must be false and the request must be advice-only.",
+            "If needs_workspace is true, choose a real language such as python, javascript, typescript, cpp, or shell.",
+            "Make the request concrete: name the input, output, artifact, bug, review target, or decision the user needs.",
         ],
     }
     return [
@@ -334,27 +350,38 @@ def extract_json_object(text: str) -> dict[str, Any]:
 
 def deterministic_task(persona: PersonaRecord, *, intents: list[str], languages: list[str], index: int) -> dict[str, Any]:
     brief = persona_brief(persona)
-    occupation = brief.get("occupation") or "practical user"
-    skill_text = brief.get("skills_and_expertise") or brief.get("professional_persona") or "day-to-day work"
+    occupation = human_occupation(brief.get("occupation"))
+    focus = persona_focus(brief)
     intent = intents[index % len(intents)]
     language = languages[index % len(languages)]
-    needs_workspace = intent in {"build", "automation", "data_transform"}
+    needs_workspace = intent in WORKSPACE_INTENTS
+    if needs_workspace and language == "none":
+        language = "python" if "python" in languages else next((item for item in languages if item != "none"), "python")
     if needs_workspace:
-        request = (
-            f"I work as a {occupation} and need a small {language} tool related to {skill_text}. "
-            "Build it from this empty folder. Keep it simple, include a README, and add a smoke test or a few tests I can run locally."
-        )
+        subject = f" for my work as a {occupation}" if occupation else ""
+        if language == "shell":
+            request = (
+                f"Please build a small shell utility{subject} that helps with {focus}. "
+                "It should run locally, include a README, and have a simple smoke-test command."
+            )
+        else:
+            request = (
+                f"Please build a small {language} project{subject} that helps with {focus}. "
+                "Include a README, a tiny sample input if useful, and a smoke test or unit test I can run locally."
+            )
         artifacts = ["README.md", "tests/"]
         commands = ["python3 -m pytest -q"] if language == "python" else []
     else:
+        subject = f" as a {occupation}" if occupation else ""
+        language_part = "" if language == "none" else f" in {language}"
         request = (
-            f"I work as a {occupation}. Give me concrete coding-agent guidance for a {language} task related to {skill_text}. "
-            "Keep it practical, cite assumptions, and include a small example if helpful."
+            f"I need practical coding-agent help{subject} for {focus}. "
+            f"Give me a concrete plan{language_part}, include assumptions, and show a small example or checklist I can use."
         )
         artifacts = []
         commands = []
     return {
-        "title": f"{occupation} {intent}",
+        "title": f"{occupation or 'persona'} {intent}",
         "intent": intent,
         "language": language,
         "needs_workspace": needs_workspace,
@@ -363,6 +390,39 @@ def deterministic_task(persona: PersonaRecord, *, intents: list[str], languages:
         "verify_commands": commands,
         "difficulty": "easy",
     }
+
+
+def human_occupation(value: Any) -> str | None:
+    if not value:
+        return None
+    text = str(value).strip().replace("_", " ")
+    if not text or text.lower() in {"not in workforce", "not_in_workforce", "none", "unknown"}:
+        return None
+    return text[:80]
+
+
+def first_sentence(text: str, *, limit: int) -> str:
+    text = " ".join(str(text).split())
+    if not text:
+        return ""
+    match = re.search(r"(?<=[.!?])\s+", text)
+    if match and match.start() <= limit:
+        text = text[: match.start()].strip()
+    return text[:limit].rstrip(" ,.;:")
+
+
+def persona_focus(brief: dict[str, Any]) -> str:
+    for key in (
+        "skills_and_expertise",
+        "career_goals_and_ambitions",
+        "hobbies_and_interests",
+        "professional_persona",
+        "persona",
+    ):
+        value = brief.get(key)
+        if isinstance(value, str) and value.strip():
+            return first_sentence(value, limit=170)
+    return "organizing a small local workflow"
 
 
 def normalize_generated_task(payload: dict[str, Any], *, intents: list[str], languages: list[str]) -> dict[str, Any]:
@@ -379,7 +439,7 @@ def normalize_generated_task(payload: dict[str, Any], *, intents: list[str], lan
         "title": str(payload.get("title") or f"{intent} task").strip(),
         "intent": intent,
         "language": language,
-        "needs_workspace": bool(payload.get("needs_workspace", intent in {"build", "automation", "data_transform"})),
+        "needs_workspace": bool(payload.get("needs_workspace", intent in WORKSPACE_INTENTS)),
         "user_request": user_request,
         "expected_artifacts": list(payload.get("expected_artifacts") or []),
         "verify_commands": list(payload.get("verify_commands") or []),
@@ -388,6 +448,29 @@ def normalize_generated_task(payload: dict[str, Any], *, intents: list[str], lan
     if payload.get("generation_error"):
         normalized["generation_error"] = str(payload["generation_error"])
     return normalized
+
+
+def generated_task_quality_errors(task: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    request = str(task.get("user_request") or "").strip()
+    lowered = request.lower()
+    if len(request) < 40:
+        errors.append("user_request is too short")
+    if len(request) > 1200:
+        errors.append("user_request is too long")
+    for phrase in BAD_REQUEST_PHRASES:
+        if phrase in lowered:
+            errors.append(f"user_request contains low-quality phrase: {phrase}")
+            break
+    language = str(task.get("language") or "")
+    needs_workspace = bool(task.get("needs_workspace"))
+    if needs_workspace and language == "none":
+        errors.append("workspace tasks cannot use language=none")
+    if language == "none" and task.get("verify_commands"):
+        errors.append("language=none tasks cannot have verify_commands")
+    if needs_workspace and not task.get("expected_artifacts"):
+        errors.append("workspace tasks should name expected_artifacts")
+    return errors
 
 
 def pi_prompt(task: dict[str, Any]) -> str:
@@ -497,6 +580,9 @@ def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> li
                         timeout_sec=args.request_timeout_sec,
                     )
                     generated = normalize_generated_task(extract_json_object(content), intents=intents, languages=languages)
+                    quality_errors = generated_task_quality_errors(generated)
+                    if quality_errors:
+                        raise ValueError("generated task failed quality gate: " + "; ".join(quality_errors))
                     break
                 except Exception as exc:  # noqa: BLE001 - report retryable API/parsing errors.
                     last_error = exc
