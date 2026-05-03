@@ -149,6 +149,53 @@ Each repo gets architecture, reproduction, core-flow, test-map, critic,
 debug-plan, small-edit-plan, API-surface, and one domain-specific task. These
 first-stage tasks are behavior/style traces, not verifier-backed RL tasks.
 
+### Persona-conditioned task generation
+
+Use an LLM to turn sampled personas into realistic single-turn coding-agent
+requests. These tasks may ask for a small build, automation script, debugging
+plan, design advice, review, how-to answer, or data transform. They are meant
+to diversify the first user message while keeping the rollout Pi-native.
+
+Create a small dry-run from a local persona JSONL:
+
+```bash
+python3 scripts/generate_persona_pi_tasks.py \
+  --personas-file data/personas/sample.jsonl \
+  --sample-size 10 \
+  --root-dir /root/etpi-persona-workspaces \
+  --out data/pi_tasks/persona_tasks_10.jsonl \
+  --create-workspaces \
+  --dry-run
+```
+
+Generate persona tasks from Nemotron Personas with OpenRouter:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+
+uv run --with datasets --with huggingface-hub python scripts/generate_persona_pi_tasks.py \
+  --dataset nvidia/Nemotron-Personas-USA \
+  --split train \
+  --sample-size 100 \
+  --seed 7 \
+  --root-dir /root/etpi-persona-workspaces \
+  --out data/pi_tasks/persona_tasks_100.jsonl \
+  --create-workspaces \
+  --model qwen/qwen3.5-27b
+```
+
+Run the generated tasks with only stronger Pi thinking settings:
+
+```bash
+python3 scripts/generate_pi_rpc_traces.py \
+  --tasks data/pi_tasks/persona_tasks_100.jsonl \
+  --provider openrouter \
+  --model qwen/qwen3.5-27b \
+  --thinking-levels medium,high \
+  --timeout-sec 1800 \
+  --out-dir data/pi_traces/persona_tasks_100_medium_high
+```
+
 Create a tiny task file:
 
 ```bash
