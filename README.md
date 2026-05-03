@@ -131,9 +131,20 @@ export OPENROUTER_API_KEY=sk-or-...
 python3 scripts/generate_pi_rpc_traces.py \
   --tasks data/pi_tasks/smoke.jsonl \
   --provider openrouter \
-  --model qwen/qwen3.6-27b \
+  --model qwen/qwen3.5-27b \
   --thinking-level medium \
   --out-dir data/pi_traces/smoke
+```
+
+To compare Pi thinking levels on the same task:
+
+```bash
+python3 scripts/generate_pi_rpc_traces.py \
+  --tasks data/pi_tasks/smoke.jsonl \
+  --provider openrouter \
+  --model qwen/qwen3.5-27b \
+  --thinking-levels off,minimal,low,medium,high \
+  --out-dir data/pi_traces/smoke-thinking-sweep
 ```
 
 For a no-network dry run:
@@ -156,6 +167,12 @@ Outputs:
 This intentionally does not convert actions to Terminal-Bench tools. Pi is the
 protocol: downstream training should replace verbose `thinking` chunks with a
 compact symbolic thinker while preserving Pi-native tool calls.
+
+Summarize generated sessions:
+
+```bash
+python3 scripts/summarize_pi_trace.py --show-tools data/pi_traces/smoke/sessions/*.jsonl
+```
 
 ### Start the server
 

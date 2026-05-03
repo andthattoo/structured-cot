@@ -45,7 +45,7 @@ def test_build_pi_command_uses_rpc_openrouter_model_and_session_dir(tmp_path: Pa
     args = argparse.Namespace(
         pi_bin="pi",
         provider="openrouter",
-        model="qwen/qwen3.6-27b",
+        model="qwen/qwen3.5-27b",
         pi_arg=["--some-flag", "value"],
     )
 
@@ -58,7 +58,7 @@ def test_build_pi_command_uses_rpc_openrouter_model_and_session_dir(tmp_path: Pa
         "--provider",
         "openrouter",
         "--model",
-        "qwen/qwen3.6-27b",
+        "qwen/qwen3.5-27b",
         "--session-dir",
     ]
     assert command[-2:] == ["--some-flag", "value"]
@@ -99,3 +99,41 @@ def test_newest_created_session_file_prefers_new_file(tmp_path: Path) -> None:
     selected = generate_pi_rpc_traces.newest_created_session_file(session_dir, before, started)
 
     assert selected == new_file.resolve()
+
+
+def test_thinking_level_sweep_expands_tasks() -> None:
+    tasks = [
+        generate_pi_rpc_traces.TaskSpec(
+            task_id="read_repo",
+            prompt="Read repo",
+            cwd=".",
+            thinking_level="medium",
+            metadata={"source": "manual"},
+        )
+    ]
+
+    expanded = generate_pi_rpc_traces.expand_tasks_for_thinking_levels(tasks, ["off", "high"])
+
+    assert [task.task_id for task in expanded] == ["read_repo__think_off", "read_repo__think_high"]
+    assert [task.thinking_level for task in expanded] == ["off", "high"]
+    assert expanded[0].metadata["base_task_id"] == "read_repo"
+    assert expanded[0].metadata["thinking_level_sweep"] is True
+
+
+def test_event_error_message_catches_assistant_api_error() -> None:
+    event = {
+        "type": "message_end",
+        "message": {
+            "role": "assistant",
+            "stopReason": "error",
+            "errorMessage": "401 User not found.",
+        },
+    }
+
+    assert generate_pi_rpc_traces.event_error_message(event) == "401 User not found."
+
+
+def test_event_error_message_catches_failed_response() -> None:
+    event = {"type": "response", "success": False, "error": "bad command"}
+
+    assert "bad command" in generate_pi_rpc_traces.event_error_message(event)

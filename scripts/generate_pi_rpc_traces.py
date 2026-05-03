@@ -30,9 +30,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-DEFAULT_MODEL = "qwen/qwen3.6-27b"
+DEFAULT_MODEL = "qwen/qwen3.5-27b"
 DEFAULT_PROVIDER = "openrouter"
 DEFAULT_TIMEOUT_SEC = 900.0
+THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
 TASK_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
@@ -119,6 +120,45 @@ def load_tasks(path: Path, *, max_tasks: int | None = None) -> list[TaskSpec]:
     return tasks
 
 
+def parse_thinking_levels(value: str | None) -> list[str] | None:
+    if value is None or not value.strip():
+        return None
+    levels = [item.strip() for item in value.split(",") if item.strip()]
+    unknown = [level for level in levels if level not in THINKING_LEVELS]
+    if unknown:
+        raise ValueError(
+            f"unknown thinking level(s): {unknown}; expected one of {sorted(THINKING_LEVELS)}"
+        )
+    return levels
+
+
+def expand_tasks_for_thinking_levels(tasks: list[TaskSpec], levels: list[str] | None) -> list[TaskSpec]:
+    if not levels:
+        return tasks
+    expanded: list[TaskSpec] = []
+    for task in tasks:
+        for level in levels:
+            metadata = dict(task.metadata or {})
+            metadata.update(
+                {
+                    "base_task_id": task.task_id,
+                    "thinking_level_sweep": True,
+                }
+            )
+            session_name = f"{task.session_name}__think_{level}" if task.session_name else None
+            expanded.append(
+                TaskSpec(
+                    task_id=f"{task.task_id}__think_{level}",
+                    prompt=task.prompt,
+                    cwd=task.cwd,
+                    thinking_level=level,
+                    session_name=session_name,
+                    metadata=metadata,
+                )
+            )
+    return expanded
+
+
 def build_pi_command(args: argparse.Namespace, session_dir: Path) -> list[str]:
     command = [
         args.pi_bin,
@@ -196,6 +236,24 @@ def env_check(provider: str, *, skip: bool) -> None:
             "OPENROUTER_API_KEY is not set. Export it or pass --skip-env-check "
             "if your Pi config supplies credentials another way."
         )
+
+
+def event_error_message(event: dict[str, Any]) -> str | None:
+    if event.get("type") in {"error", "agent_error"}:
+        return json.dumps(event, ensure_ascii=False)
+
+    if event.get("type") == "response" and event.get("success") is False:
+        return json.dumps(event, ensure_ascii=False)
+
+    message = event.get("message")
+    if isinstance(message, dict):
+        error_message = message.get("errorMessage")
+        if error_message:
+            return str(error_message)
+        if message.get("stopReason") == "error":
+            return "Pi assistant message stopped with error"
+
+    return None
 
 
 def run_one_task(task: TaskSpec, args: argparse.Namespace, out_dir: Path) -> TaskResult:
@@ -276,11 +334,13 @@ def run_one_task(task: TaskSpec, args: argparse.Namespace, out_dir: Path) -> Tas
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(event, dict) and event.get("type") == "agent_end":
-                agent_end_seen = True
-                break
-            if isinstance(event, dict) and event.get("type") in {"error", "agent_error"}:
-                error = json.dumps(event, ensure_ascii=False)
+            if isinstance(event, dict):
+                event_error = event_error_message(event)
+                if event_error:
+                    error = event_error
+                if event.get("type") == "agent_end":
+                    agent_end_seen = True
+                    break
 
         if not agent_end_seen and proc.poll() is None and time.monotonic() >= deadline:
             error = f"timed out after {args.timeout_sec:.1f}s"
@@ -321,6 +381,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--provider", default=DEFAULT_PROVIDER)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--thinking-level", default="medium", help="Default Pi thinking level; empty string disables command.")
+    parser.add_argument(
+        "--thinking-levels",
+        default=None,
+        help="Comma-separated sweep, e.g. off,minimal,low,medium,high. Overrides per-task/default levels.",
+    )
     parser.add_argument("--cwd", default=".", help="Default cwd for tasks without cwd/repo.")
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
     parser.add_argument("--max-tasks", type=int, default=None)
@@ -335,7 +400,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.thinking_level == "":
         args.thinking_level = None
     env_check(args.provider, skip=args.skip_env_check or args.dry_run)
-    tasks = load_tasks(args.tasks, max_tasks=args.max_tasks)
+    sweep_levels = parse_thinking_levels(args.thinking_levels)
+    tasks = expand_tasks_for_thinking_levels(
+        load_tasks(args.tasks, max_tasks=args.max_tasks),
+        sweep_levels,
+    )
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = args.out_dir or Path("data/pi_traces") / stamp
     out_dir.mkdir(parents=True, exist_ok=True)
