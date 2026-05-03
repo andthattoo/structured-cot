@@ -35,6 +35,7 @@ DEFAULT_PROVIDER = "openrouter"
 DEFAULT_TIMEOUT_SEC = 900.0
 THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
 TASK_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+RUN_LOCK_NAME = ".generate_pi_rpc_traces.lock"
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,41 @@ def newest_created_session_file(session_dir: Path, before: set[Path], started_mo
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def acquire_run_lock(out_dir: Path, *, force: bool = False) -> tuple[Path, int]:
+    lock_path = out_dir / RUN_LOCK_NAME
+    if force:
+        lock_path.unlink(missing_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "started_at": utc_now(),
+        "out_dir": str(out_dir.resolve()),
+    }
+    try:
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError as exc:
+        try:
+            existing = lock_path.read_text().strip()
+        except OSError:
+            existing = "<unreadable>"
+        raise RuntimeError(
+            f"{out_dir} is already locked by another trace run: {lock_path}\n"
+            f"lock contents: {existing}\n"
+            "Use a different --out-dir, or verify no generator is running and remove the stale lock."
+        ) from exc
+    os.write(fd, (json.dumps(payload, sort_keys=True) + "\n").encode())
+    return lock_path, fd
+
+
+def release_run_lock(lock_path: Path, fd: int) -> None:
+    try:
+        os.close(fd)
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def timestamp_from_message(message: dict[str, Any], fallback: str) -> str:
@@ -516,6 +552,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-tasks", type=int, default=None)
     parser.add_argument("--skip-env-check", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--force-lock",
+        action="store_true",
+        help="Remove an existing output-directory lock before starting. Use only after checking no run is active.",
+    )
     parser.add_argument("--pi-arg", action="append", default=[], help="Extra argument passed through to pi; repeatable.")
     return parser.parse_args(argv)
 
@@ -546,47 +587,51 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     ok = 0
-    with manifest_path.open("a") as manifest:
-        for task in tasks:
-            try:
-                result = run_one_task(task, args, out_dir)
-            except Exception as exc:
-                now = utc_now()
-                result = TaskResult(
-                    task_id=task.task_id,
-                    status="error",
-                    started_at=now,
-                    ended_at=now,
-                    elapsed_sec=0.0,
-                    cwd=str(Path(task.cwd or args.cwd).expanduser()),
-                    session_file=None,
-                    rpc_events_file="",
-                    stderr_file="",
-                    stdout_events=0,
-                    stderr_lines=0,
-                    agent_end_seen=False,
-                    exit_code=None,
-                    error=repr(exc),
-                    pi_command=[],
-                    task=asdict(task),
+    lock_path, lock_fd = acquire_run_lock(out_dir, force=args.force_lock)
+    try:
+        with manifest_path.open("a") as manifest:
+            for task in tasks:
+                try:
+                    result = run_one_task(task, args, out_dir)
+                except Exception as exc:
+                    now = utc_now()
+                    result = TaskResult(
+                        task_id=task.task_id,
+                        status="error",
+                        started_at=now,
+                        ended_at=now,
+                        elapsed_sec=0.0,
+                        cwd=str(Path(task.cwd or args.cwd).expanduser()),
+                        session_file=None,
+                        rpc_events_file="",
+                        stderr_file="",
+                        stdout_events=0,
+                        stderr_lines=0,
+                        agent_end_seen=False,
+                        exit_code=None,
+                        error=repr(exc),
+                        pi_command=[],
+                        task=asdict(task),
+                    )
+                if result.status == "ok":
+                    ok += 1
+                manifest.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
+                manifest.flush()
+                print(
+                    json.dumps(
+                        {
+                            "task_id": result.task_id,
+                            "status": result.status,
+                            "elapsed_sec": result.elapsed_sec,
+                            "session_file": result.session_file,
+                            "error": result.error,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
                 )
-            if result.status == "ok":
-                ok += 1
-            manifest.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
-            manifest.flush()
-            print(
-                json.dumps(
-                    {
-                        "task_id": result.task_id,
-                        "status": result.status,
-                        "elapsed_sec": result.elapsed_sec,
-                        "session_file": result.session_file,
-                        "error": result.error,
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
+    finally:
+        release_run_lock(lock_path, lock_fd)
 
     print(json.dumps({"out_dir": str(out_dir), "manifest": str(manifest_path), "ok": ok, "total": len(tasks)}, sort_keys=True))
     return 0 if ok == len(tasks) else 1

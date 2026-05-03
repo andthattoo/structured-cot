@@ -252,3 +252,19 @@ def test_repair_rows_backfills_session_file(tmp_path: Path) -> None:
     assert repaired == 1
     assert rows[0]["session_file"]
     assert Path(rows[0]["session_file"]).exists()
+
+
+def test_run_lock_rejects_second_writer(tmp_path: Path) -> None:
+    lock_path, fd = generate_pi_rpc_traces.acquire_run_lock(tmp_path)
+
+    try:
+        try:
+            generate_pi_rpc_traces.acquire_run_lock(tmp_path)
+        except RuntimeError as exc:
+            assert "already locked" in str(exc)
+        else:
+            raise AssertionError("second lock acquisition should fail")
+    finally:
+        generate_pi_rpc_traces.release_run_lock(lock_path, fd)
+
+    assert not lock_path.exists()
