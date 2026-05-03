@@ -179,7 +179,12 @@ def build_pi_command(args: argparse.Namespace, session_dir: Path) -> list[str]:
 def list_session_files(session_dir: Path) -> set[Path]:
     if not session_dir.exists():
         return set()
-    return {path.resolve() for path in session_dir.rglob("*.jsonl") if path.is_file()}
+    reconstructed_dir = (session_dir / "reconstructed").resolve()
+    return {
+        path.resolve()
+        for path in session_dir.rglob("*.jsonl")
+        if path.is_file() and reconstructed_dir not in path.resolve().parents
+    }
 
 
 def newest_created_session_file(session_dir: Path, before: set[Path], started_monotonic: float) -> Path | None:
@@ -209,17 +214,40 @@ def acquire_run_lock(out_dir: Path, *, force: bool = False) -> tuple[Path, int]:
     try:
         fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except FileExistsError as exc:
-        try:
-            existing = lock_path.read_text().strip()
-        except OSError:
-            existing = "<unreadable>"
+        existing = read_lock(lock_path)
+        if existing and not pid_is_alive(existing.get("pid")):
+            lock_path.unlink(missing_ok=True)
+            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            os.write(fd, (json.dumps(payload, sort_keys=True) + "\n").encode())
+            return lock_path, fd
+        existing_text = json.dumps(existing, sort_keys=True) if existing else "<unreadable>"
         raise RuntimeError(
             f"{out_dir} is already locked by another trace run: {lock_path}\n"
-            f"lock contents: {existing}\n"
+            f"lock contents: {existing_text}\n"
             "Use a different --out-dir, or verify no generator is running and remove the stale lock."
         ) from exc
     os.write(fd, (json.dumps(payload, sort_keys=True) + "\n").encode())
     return lock_path, fd
+
+
+def read_lock(lock_path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(lock_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def pid_is_alive(pid: Any) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def release_run_lock(lock_path: Path, fd: int) -> None:

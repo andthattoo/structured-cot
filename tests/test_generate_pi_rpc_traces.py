@@ -109,6 +109,16 @@ def test_newest_created_session_file_prefers_new_file(tmp_path: Path) -> None:
     assert selected == new_file.resolve()
 
 
+def test_session_discovery_ignores_reconstructed_files(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions"
+    reconstructed_dir = session_dir / "reconstructed"
+    reconstructed_dir.mkdir(parents=True)
+    reconstructed_file = reconstructed_dir / "old.jsonl"
+    reconstructed_file.write_text("{}\n")
+
+    assert generate_pi_rpc_traces.list_session_files(session_dir) == set()
+
+
 def test_thinking_level_sweep_expands_tasks() -> None:
     tasks = [
         generate_pi_rpc_traces.TaskSpec(
@@ -268,3 +278,16 @@ def test_run_lock_rejects_second_writer(tmp_path: Path) -> None:
         generate_pi_rpc_traces.release_run_lock(lock_path, fd)
 
     assert not lock_path.exists()
+
+
+def test_run_lock_reclaims_dead_pid_lock(tmp_path: Path) -> None:
+    lock_path = tmp_path / generate_pi_rpc_traces.RUN_LOCK_NAME
+    lock_path.write_text(json.dumps({"pid": 99999999, "started_at": "old"}) + "\n")
+
+    acquired_path, fd = generate_pi_rpc_traces.acquire_run_lock(tmp_path)
+
+    try:
+        assert acquired_path == lock_path
+        assert json.loads(lock_path.read_text())["pid"] != 99999999
+    finally:
+        generate_pi_rpc_traces.release_run_lock(acquired_path, fd)
