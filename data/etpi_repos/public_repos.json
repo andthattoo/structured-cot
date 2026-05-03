@@ -64,7 +64,7 @@
     "domain": "cpp",
     "name": "fmt",
     "url": "https://github.com/fmtlib/fmt.git",
-    "checkout": "master",
+    "checkout": "main",
     "setup": ["cmake -S . -B build -DFMT_TEST=ON -DCMAKE_BUILD_TYPE=Release"],
     "smoke_tests": ["cmake --build build -j2", "ctest --test-dir build --output-on-failure -j2"],
     "notes": "Compact modern C++ formatting library."

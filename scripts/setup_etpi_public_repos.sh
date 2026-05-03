@@ -41,6 +41,16 @@ def run(command, cwd=None):
     subprocess.run(command, shell=True, cwd=cwd, check=True)
 
 
+def try_checkout(ref, cwd):
+    try:
+        run(f"git checkout {shlex.quote(str(ref))}", cwd=cwd)
+    except subprocess.CalledProcessError:
+        current = subprocess.check_output(
+            "git rev-parse --abbrev-ref HEAD", shell=True, cwd=cwd, text=True
+        ).strip()
+        print(f"WARNING: could not checkout {ref!r}; continuing on {current!r}", flush=True)
+
+
 for repo in repos:
     repo_id = repo["repo_id"]
     dest = root / repo_id
@@ -53,7 +63,7 @@ for repo in repos:
             run(f"git clone {shlex.quote(repo['url'])} {shlex.quote(str(dest))}")
         checkout = repo.get("checkout")
         if checkout:
-            run(f"git checkout {shlex.quote(str(checkout))}", cwd=dest)
+            try_checkout(checkout, cwd=dest)
 
     if mode in {"setup", "all"}:
         if not dest.exists():
