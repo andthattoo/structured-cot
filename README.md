@@ -114,6 +114,41 @@ tasks, TaskTrove, SWE-Gym, or local micro-benchmarks, but the collected traces
 stay Pi-native: typed `thinking`, `toolCall`, and `toolResult` chunks in Pi's
 session JSONL format.
 
+### Public CPU repo pool
+
+The initial ETPI pool intentionally uses only public CPU-friendly repositories:
+
+- Python: `pallets/click`, `encode/httpx`, `fastapi/typer`
+- WebDev: `vitejs/vite`, `remix-run/react-router`, `tailwindlabs/headlessui`
+- C++: `fmtlib/fmt`, `nlohmann/json`, `catchorg/Catch2`
+
+Clone them on the CPU machine:
+
+```bash
+ROOT_DIR=/root/etpi-repos MODE=clone bash scripts/setup_etpi_public_repos.sh
+```
+
+Optional setup/smoke commands are listed in `data/etpi_repos/public_repos.json`.
+Run them selectively; some web/C++ dependency installs can be slower than the
+read-only trace tasks need:
+
+```bash
+ROOT_DIR=/root/etpi-repos MODE=setup bash scripts/setup_etpi_public_repos.sh
+ROOT_DIR=/root/etpi-repos MODE=smoke bash scripts/setup_etpi_public_repos.sh
+```
+
+Generate clear Pi task definitions for those repos:
+
+```bash
+python3 scripts/make_etpi_repo_tasks.py \
+  --root-dir /root/etpi-repos \
+  --out data/pi_tasks/etpi_public_repo_tasks.jsonl
+```
+
+Each repo gets architecture, reproduction, core-flow, test-map, critic,
+debug-plan, small-edit-plan, API-surface, and one domain-specific task. These
+first-stage tasks are behavior/style traces, not verifier-backed RL tasks.
+
 Create a tiny task file:
 
 ```bash

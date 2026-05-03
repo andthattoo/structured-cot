@@ -1,0 +1,92 @@
+[
+  {
+    "repo_id": "python_click",
+    "domain": "python",
+    "name": "click",
+    "url": "https://github.com/pallets/click.git",
+    "checkout": "main",
+    "setup": ["python3 -m pip install -e '.[dev]'"],
+    "smoke_tests": ["python3 -m pytest tests/test_basic.py -q"],
+    "notes": "Python CLI/parser library with compact tests and docs."
+  },
+  {
+    "repo_id": "python_httpx",
+    "domain": "python",
+    "name": "httpx",
+    "url": "https://github.com/encode/httpx.git",
+    "checkout": "master",
+    "setup": ["python3 -m pip install -e '.[cli,http2,socks,zstd,brotli]' pytest"],
+    "smoke_tests": ["python3 -m pytest tests -q --maxfail=1"],
+    "notes": "Python HTTP client with async/sync transport architecture."
+  },
+  {
+    "repo_id": "python_typer",
+    "domain": "python",
+    "name": "typer",
+    "url": "https://github.com/fastapi/typer.git",
+    "checkout": "master",
+    "setup": ["python3 -m pip install -e '.[all]' pytest"],
+    "smoke_tests": ["python3 -m pytest tests -q --maxfail=1"],
+    "notes": "Python CLI framework built on Click."
+  },
+  {
+    "repo_id": "web_vite",
+    "domain": "webdev",
+    "name": "vite",
+    "url": "https://github.com/vitejs/vite.git",
+    "checkout": "main",
+    "setup": ["corepack enable || true", "pnpm install --ignore-scripts"],
+    "smoke_tests": ["pnpm --version", "pnpm test -- --runInBand"],
+    "notes": "TypeScript frontend build tool with plugin and dev-server architecture."
+  },
+  {
+    "repo_id": "web_react_router",
+    "domain": "webdev",
+    "name": "react-router",
+    "url": "https://github.com/remix-run/react-router.git",
+    "checkout": "main",
+    "setup": ["corepack enable || true", "pnpm install --ignore-scripts"],
+    "smoke_tests": ["pnpm --version"],
+    "notes": "TypeScript router framework with packages and examples."
+  },
+  {
+    "repo_id": "web_headlessui",
+    "domain": "webdev",
+    "name": "headlessui",
+    "url": "https://github.com/tailwindlabs/headlessui.git",
+    "checkout": "main",
+    "setup": ["corepack enable || true", "pnpm install --ignore-scripts"],
+    "smoke_tests": ["pnpm --version"],
+    "notes": "TypeScript UI component library for React/Vue."
+  },
+  {
+    "repo_id": "cpp_fmt",
+    "domain": "cpp",
+    "name": "fmt",
+    "url": "https://github.com/fmtlib/fmt.git",
+    "checkout": "master",
+    "setup": ["cmake -S . -B build -DFMT_TEST=ON -DCMAKE_BUILD_TYPE=Release"],
+    "smoke_tests": ["cmake --build build -j2", "ctest --test-dir build --output-on-failure -j2"],
+    "notes": "Compact modern C++ formatting library."
+  },
+  {
+    "repo_id": "cpp_json",
+    "domain": "cpp",
+    "name": "json",
+    "url": "https://github.com/nlohmann/json.git",
+    "checkout": "develop",
+    "setup": ["cmake -S . -B build -DJSON_BuildTests=ON -DCMAKE_BUILD_TYPE=Release"],
+    "smoke_tests": ["cmake --build build -j2", "ctest --test-dir build --output-on-failure -j2"],
+    "notes": "Header-only C++ JSON parser/library."
+  },
+  {
+    "repo_id": "cpp_catch2",
+    "domain": "cpp",
+    "name": "Catch2",
+    "url": "https://github.com/catchorg/Catch2.git",
+    "checkout": "devel",
+    "setup": ["cmake -S . -B build -DCATCH_BUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release"],
+    "smoke_tests": ["cmake --build build -j2", "ctest --test-dir build --output-on-failure -j2"],
+    "notes": "C++ test framework with clear internal organization."
+  }
+]
