@@ -113,3 +113,45 @@ def test_dry_run_main_writes_tasks_and_workspaces(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert Path(rows[0]["cwd"]).exists()
     assert rows[0]["prompt"]
+
+
+def test_dataset_sampling_uses_shuffled_take_without_full_scan(monkeypatch) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.iterated = 0
+
+        def shuffle(self, *, seed: int, buffer_size: int) -> "FakeStream":
+            assert seed == 7
+            assert buffer_size == 10000
+            return self
+
+        def __iter__(self):
+            for index in range(1_000_000):
+                self.iterated += 1
+                yield {"uuid": f"row-{index}", "occupation": "tester"}
+
+    fake_stream = FakeStream()
+
+    def fake_load_dataset(dataset: str, *, split: str, streaming: bool) -> FakeStream:
+        assert dataset == "fake/personas"
+        assert split == "train"
+        assert streaming is True
+        return fake_stream
+
+    monkeypatch.setitem(
+        sys.modules,
+        "datasets",
+        type("FakeDatasets", (), {"load_dataset": staticmethod(fake_load_dataset)}),
+    )
+
+    personas = generate_persona_pi_tasks.load_personas_from_dataset(
+        "fake/personas",
+        split="train",
+        sample_size=3,
+        seed=7,
+        max_source_rows=None,
+        shuffle_buffer=10000,
+    )
+
+    assert len(personas) == 3
+    assert fake_stream.iterated == 3

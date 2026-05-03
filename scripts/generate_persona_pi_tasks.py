@@ -87,6 +87,7 @@ def load_personas_from_dataset(
     sample_size: int,
     seed: int,
     max_source_rows: int | None,
+    shuffle_buffer: int,
 ) -> list[PersonaRecord]:
     try:
         from datasets import load_dataset
@@ -98,10 +99,22 @@ def load_personas_from_dataset(
 
     stream = load_dataset(dataset, split=split, streaming=True)
 
+    if max_source_rows is None:
+        shuffled = stream.shuffle(seed=seed, buffer_size=max(sample_size, shuffle_buffer))
+        sampled = []
+        for index, row in enumerate(shuffled, 1):
+            sampled.append(dict(row))
+            if index >= sample_size:
+                break
+        return [
+            PersonaRecord(persona_id=row_persona_id(row, f"persona_{idx:06d}"), row=row)
+            for idx, row in enumerate(sampled, 1)
+        ]
+
     def iter_rows() -> Iterable[dict[str, Any]]:
         for index, row in enumerate(stream, 1):
             yield dict(row)
-            if max_source_rows is not None and index >= max_source_rows:
+            if index >= max_source_rows:
                 break
 
     sampled = reservoir_sample(iter_rows(), sample_size=sample_size, seed=seed)
@@ -432,6 +445,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sample-size", type=int, default=100)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--max-source-rows", type=int, default=None)
+    parser.add_argument(
+        "--shuffle-buffer",
+        type=int,
+        default=10000,
+        help="Streaming shuffle buffer for HF dataset sampling when --max-source-rows is not set.",
+    )
     parser.add_argument("--root-dir", type=Path, default=Path("/root/etpi-persona-workspaces"))
     parser.add_argument("--out", type=Path, default=Path("data/pi_tasks/persona_tasks.jsonl"))
     parser.add_argument("--create-workspaces", action="store_true")
@@ -463,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
             sample_size=args.sample_size,
             seed=args.seed,
             max_source_rows=args.max_source_rows,
+            shuffle_buffer=args.shuffle_buffer,
         )
 
     rows = generate_rows(args, personas)
