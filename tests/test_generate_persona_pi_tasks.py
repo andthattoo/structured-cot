@@ -198,7 +198,25 @@ def test_deterministic_task_avoids_raw_persona_dump_for_not_in_workforce() -> No
     assert "not_in_workforce" not in task["user_request"]
     assert "related to" not in task["user_request"]
     assert "none tool" not in task["user_request"]
+    assert "Lifelong humanities research" not in task["user_request"]
+    assert len(task["user_request"]) < 450
     assert not generate_persona_pi_tasks.generated_task_quality_errors(task)
+
+
+def test_persona_focus_extracts_short_keywords_not_biography() -> None:
+    focus = generate_persona_pi_tasks.persona_focus(
+        {
+            "skills_and_expertise": (
+                "Yang Yoshiaki Skubis is a licensed civil engineer with a graduate STEM education "
+                "and eight years of experience on both public and private infrastructure projects."
+            )
+        },
+        occupation="civil engineer",
+    )
+
+    assert focus == "civil, engineer, and licensed"
+    assert "Yang" not in focus
+    assert "Skubis" not in focus
 
 
 def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypatch) -> None:

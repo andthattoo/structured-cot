@@ -38,6 +38,37 @@ BAD_REQUEST_PHRASES = (
     "skills_and_expertise",
     "career_goals_and_ambitions",
 )
+STOPWORDS = {
+    "about",
+    "also",
+    "analytical",
+    "and",
+    "both",
+    "combined",
+    "concrete",
+    "developed",
+    "education",
+    "experience",
+    "expertise",
+    "good",
+    "has",
+    "have",
+    "including",
+    "lifelong",
+    "methodical",
+    "nature",
+    "private",
+    "professional",
+    "projects",
+    "public",
+    "skills",
+    "solid",
+    "strong",
+    "their",
+    "with",
+    "work",
+    "years",
+}
 
 
 def progress(iterable, **kwargs):
@@ -351,7 +382,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
 def deterministic_task(persona: PersonaRecord, *, intents: list[str], languages: list[str], index: int) -> dict[str, Any]:
     brief = persona_brief(persona)
     occupation = human_occupation(brief.get("occupation"))
-    focus = persona_focus(brief)
+    focus = persona_focus(brief, occupation=occupation)
     intent = intents[index % len(intents)]
     language = languages[index % len(languages)]
     needs_workspace = intent in WORKSPACE_INTENTS
@@ -359,14 +390,19 @@ def deterministic_task(persona: PersonaRecord, *, intents: list[str], languages:
         language = "python" if "python" in languages else next((item for item in languages if item != "none"), "python")
     if needs_workspace:
         subject = f" for my work as a {occupation}" if occupation else ""
-        if language == "shell":
+        if intent == "data_transform":
             request = (
-                f"Please build a small shell utility{subject} that helps with {focus}. "
-                "It should run locally, include a README, and have a simple smoke-test command."
+                f"Please build a small {language} tool{subject} that reads a CSV of {focus}, "
+                "prints a cleaned summary, and writes a normalized output file. Include a README, sample CSV, and a smoke test."
+            )
+        elif intent == "automation" or language == "shell":
+            request = (
+                f"Please build a small {language} utility{subject} that automates a local checklist for {focus}. "
+                "It should run locally, include a README, sample input, and a simple smoke-test command."
             )
         else:
             request = (
-                f"Please build a small {language} project{subject} that helps with {focus}. "
+                f"Please build a small {language} project{subject} for tracking {focus}. "
                 "Include a README, a tiny sample input if useful, and a smoke test or unit test I can run locally."
             )
         artifacts = ["README.md", "tests/"]
@@ -374,10 +410,26 @@ def deterministic_task(persona: PersonaRecord, *, intents: list[str], languages:
     else:
         subject = f" as a {occupation}" if occupation else ""
         language_part = "" if language == "none" else f" in {language}"
-        request = (
-            f"I need practical coding-agent help{subject} for {focus}. "
-            f"Give me a concrete plan{language_part}, include assumptions, and show a small example or checklist I can use."
-        )
+        if intent == "debug":
+            request = (
+                f"I need help debugging a small{language_part} script{subject} that processes {focus}. "
+                "Give me a practical debugging plan, likely failure points, and a tiny example of the kind of test I should add."
+            )
+        elif intent == "review":
+            request = (
+                f"I need a code review checklist{language_part}{subject} for a small tool that handles {focus}. "
+                "Focus on correctness, edge cases, maintainability, and tests."
+            )
+        elif intent == "design":
+            request = (
+                f"I need a lightweight design plan{language_part}{subject} for a local tool around {focus}. "
+                "Describe the data model, modules, edge cases, and a minimal test plan."
+            )
+        else:
+            request = (
+                f"I need practical coding-agent guidance{subject} for a small local workflow around {focus}. "
+                f"Give me a concrete plan{language_part}, include assumptions, and show a small example or checklist I can use."
+            )
         artifacts = []
         commands = []
     return {
@@ -411,7 +463,35 @@ def first_sentence(text: str, *, limit: int) -> str:
     return text[:limit].rstrip(" ,.;:")
 
 
-def persona_focus(brief: dict[str, Any]) -> str:
+def keyword_focus(text: str, *, occupation: str | None = None) -> str:
+    text = text.replace("_", " ")
+    candidates = [
+        token.lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z-]{3,}", text)
+        if token.lower() not in STOPWORDS and not token[:1].isupper()
+    ]
+    ordered: list[str] = []
+    for token in candidates:
+        token = token.strip("-")
+        if token and token not in ordered:
+            ordered.append(token)
+    if occupation:
+        for token in reversed(occupation.lower().split()):
+            if not token:
+                continue
+            if token in ordered:
+                ordered.remove(token)
+            ordered.insert(0, token)
+    if not ordered:
+        return "records and recurring tasks"
+    if len(ordered) == 1:
+        return ordered[0]
+    if len(ordered) == 2:
+        return f"{ordered[0]} and {ordered[1]}"
+    return f"{ordered[0]}, {ordered[1]}, and {ordered[2]}"
+
+
+def persona_focus(brief: dict[str, Any], *, occupation: str | None = None) -> str:
     for key in (
         "skills_and_expertise",
         "career_goals_and_ambitions",
@@ -421,7 +501,7 @@ def persona_focus(brief: dict[str, Any]) -> str:
     ):
         value = brief.get(key)
         if isinstance(value, str) and value.strip():
-            return first_sentence(value, limit=170)
+            return keyword_focus(first_sentence(value, limit=320), occupation=occupation)
     return "organizing a small local workflow"
 
 
@@ -458,10 +538,14 @@ def generated_task_quality_errors(task: dict[str, Any]) -> list[str]:
         errors.append("user_request is too short")
     if len(request) > 1200:
         errors.append("user_request is too long")
+    if len(request) > 450 and task.get("generation_error"):
+        errors.append("fallback user_request is too long")
     for phrase in BAD_REQUEST_PHRASES:
         if phrase in lowered:
             errors.append(f"user_request contains low-quality phrase: {phrase}")
             break
+    if re.search(r"\b[A-Z][a-z]+ [A-Z][a-z]+ [A-Z][a-z]+\b", request):
+        errors.append("user_request appears to include a full persona name")
     language = str(task.get("language") or "")
     needs_workspace = bool(task.get("needs_workspace"))
     if needs_workspace and language == "none":
