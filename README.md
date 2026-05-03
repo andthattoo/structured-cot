@@ -106,6 +106,57 @@ huggingface-cli download unsloth/Qwen3.6-35B-A3B-GGUF \
 
 The server can run in the foreground in one pane, or in the background from a single terminal.
 
+## Efficient Thinker Pi trace generation
+
+The `etpi` branch uses Pi's RPC mode as the native data-generation loop for
+Pi-Qwen efficient thinker traces. Task sources can come from hand-written repo
+tasks, TaskTrove, SWE-Gym, or local micro-benchmarks, but the collected traces
+stay Pi-native: typed `thinking`, `toolCall`, and `toolResult` chunks in Pi's
+session JSONL format.
+
+Create a tiny task file:
+
+```bash
+mkdir -p data/pi_tasks
+cat > data/pi_tasks/smoke.jsonl <<'EOF'
+{"task_id":"repo_map_structured_cot","cwd":".","prompt":"Read this repo and summarize the main experiment, files to inspect, and how to reproduce it."}
+EOF
+```
+
+Run Pi headlessly through RPC with OpenRouter:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+
+python3 scripts/generate_pi_rpc_traces.py \
+  --tasks data/pi_tasks/smoke.jsonl \
+  --provider openrouter \
+  --model qwen/qwen3.6-27b \
+  --thinking-level medium \
+  --out-dir data/pi_traces/smoke
+```
+
+For a no-network dry run:
+
+```bash
+python3 scripts/generate_pi_rpc_traces.py \
+  --tasks data/pi_tasks/smoke.jsonl \
+  --out-dir data/pi_traces/smoke \
+  --dry-run
+```
+
+Outputs:
+
+- `manifest.jsonl` — one row per task with status, cwd, command, session file,
+  RPC event log, timing, and errors.
+- `sessions/` — Pi's native persisted session JSONL files.
+- `rpc-events/` — raw RPC stdout event stream for each task.
+- `stderr/` — Pi process stderr per task.
+
+This intentionally does not convert actions to Terminal-Bench tools. Pi is the
+protocol: downstream training should replace verbose `thinking` chunks with a
+compact symbolic thinker while preserving Pi-native tool calls.
+
 ### Start the server
 
 ```bash
