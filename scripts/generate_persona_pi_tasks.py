@@ -29,6 +29,14 @@ DEFAULT_LANGUAGES = "python,javascript,typescript,cpp,shell,mixed,none"
 TASK_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
+def progress(iterable, **kwargs):
+    try:
+        from tqdm.auto import tqdm
+    except ModuleNotFoundError:
+        return iterable
+    return tqdm(iterable, **kwargs)
+
+
 @dataclass(frozen=True)
 class PersonaRecord:
     persona_id: str
@@ -102,7 +110,7 @@ def load_personas_from_dataset(
     if max_source_rows is None:
         shuffled = stream.shuffle(seed=seed, buffer_size=max(sample_size, shuffle_buffer))
         sampled = []
-        for index, row in enumerate(shuffled, 1):
+        for index, row in enumerate(progress(shuffled, total=sample_size, desc="sample personas"), 1):
             sampled.append(dict(row))
             if index >= sample_size:
                 break
@@ -383,7 +391,7 @@ def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> li
     if args.provider == "openrouter" and not args.dry_run and not api_key:
         raise SystemExit(f"{args.api_key_env} is not set")
 
-    for index, persona in enumerate(personas, 1):
+    for index, persona in enumerate(progress(personas, total=len(personas), desc="generate tasks"), 1):
         if args.dry_run:
             generated = deterministic_task(persona, intents=intents, languages=languages, index=index)
         else:

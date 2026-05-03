@@ -34,6 +34,13 @@ def test_default_persona_generator_model_is_nemotron() -> None:
     )
 
 
+def test_progress_falls_back_without_tqdm(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "tqdm.auto", None)
+    values = [1, 2, 3]
+
+    assert list(generate_persona_pi_tasks.progress(values, total=3)) == values
+
+
 def test_persona_brief_extracts_work_relevant_fields() -> None:
     persona = generate_persona_pi_tasks.PersonaRecord(persona_id="abc123", row=persona_row())
 

@@ -173,7 +173,7 @@ Generate persona tasks from Nemotron Personas with OpenRouter:
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
 
-uv run --with datasets --with huggingface-hub python scripts/generate_persona_pi_tasks.py \
+uv run --with datasets --with huggingface-hub --with tqdm python scripts/generate_persona_pi_tasks.py \
   --dataset nvidia/Nemotron-Personas-USA \
   --split train \
   --sample-size 100 \
