@@ -27,6 +27,13 @@ def persona_row() -> dict[str, object]:
     }
 
 
+def test_default_persona_generator_model_is_nemotron() -> None:
+    assert (
+        generate_persona_pi_tasks.DEFAULT_MODEL
+        == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    )
+
+
 def test_persona_brief_extracts_work_relevant_fields() -> None:
     persona = generate_persona_pi_tasks.PersonaRecord(persona_id="abc123", row=persona_row())
 

@@ -22,7 +22,7 @@ from typing import Any, Iterable
 
 
 DEFAULT_DATASET = "nvidia/Nemotron-Personas-USA"
-DEFAULT_MODEL = "qwen/qwen3.5-27b"
+DEFAULT_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 DEFAULT_PROVIDER = "openrouter"
 DEFAULT_INTENTS = "build,how_to,debug,design,automation,review,data_transform"
 DEFAULT_LANGUAGES = "python,javascript,typescript,cpp,shell,mixed,none"

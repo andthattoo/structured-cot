@@ -181,7 +181,7 @@ uv run --with datasets --with huggingface-hub python scripts/generate_persona_pi
   --root-dir /root/etpi-persona-workspaces \
   --out data/pi_tasks/persona_tasks_100.jsonl \
   --create-workspaces \
-  --model qwen/qwen3.5-27b
+  --model nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
 ```
 
 Run the generated tasks with only stronger Pi thinking settings:
