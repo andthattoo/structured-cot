@@ -28,6 +28,15 @@ DEFAULT_INTENTS = "build,how_to,debug,design,automation,review,data_transform"
 DEFAULT_LANGUAGES = "python,javascript,typescript,cpp,shell,mixed,none"
 TASK_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 WORKSPACE_INTENTS = {"build", "automation", "data_transform"}
+INTENT_LANGUAGE_PREFERENCES = {
+    "build": ("python", "javascript", "typescript", "cpp", "shell"),
+    "automation": ("shell", "python", "javascript", "typescript"),
+    "data_transform": ("python", "javascript", "typescript", "shell"),
+    "debug": ("typescript", "javascript", "python", "cpp", "shell"),
+    "design": ("cpp", "typescript", "python", "mixed", "none"),
+    "review": ("mixed", "python", "typescript", "javascript", "cpp"),
+    "how_to": ("none", "python", "javascript", "typescript", "shell"),
+}
 BAD_REQUEST_PHRASES = (
     "i work as a not_in_workforce",
     "related to ",
@@ -127,6 +136,13 @@ def progress(iterable, **kwargs):
 class PersonaRecord:
     persona_id: str
     row: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TaskTarget:
+    intent: str
+    language: str
+    needs_workspace: bool
 
 
 def slug(value: str, fallback: str = "task", limit: int = 120) -> str:
@@ -249,11 +265,42 @@ def split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def compatible_languages(intent: str, languages: list[str]) -> list[str]:
+    allowed = set(languages)
+    preferred = [language for language in INTENT_LANGUAGE_PREFERENCES.get(intent, languages) if language in allowed]
+    if intent in WORKSPACE_INTENTS:
+        preferred = [language for language in preferred if language not in {"none", "mixed"}]
+        if preferred:
+            return preferred
+        fallback = [language for language in languages if language not in {"none", "mixed"}]
+        return fallback or [languages[0]]
+    if intent == "debug":
+        preferred = [language for language in preferred if language != "none"]
+        if preferred:
+            return preferred
+        fallback = [language for language in languages if language != "none"]
+        return fallback or [languages[0]]
+    return preferred or languages
+
+
+def generation_target(index: int, *, intents: list[str], languages: list[str]) -> TaskTarget:
+    intent = intents[(index - 1) % len(intents)]
+    options = compatible_languages(intent, languages)
+    cycle = (index - 1) // len(intents)
+    language = options[cycle % len(options)]
+    return TaskTarget(
+        intent=intent,
+        language=language,
+        needs_workspace=intent in WORKSPACE_INTENTS,
+    )
+
+
 def generation_messages(
     persona: PersonaRecord,
     *,
     intents: list[str],
     languages: list[str],
+    target: TaskTarget | None = None,
 ) -> list[dict[str, str]]:
     system = (
         "You generate realistic single-turn requests for a coding agent. "
@@ -266,6 +313,15 @@ def generation_messages(
         "persona": persona_brief(persona),
         "allowed_intents": intents,
         "allowed_languages": languages,
+        "target": (
+            {
+                "intent": target.intent,
+                "language": target.language,
+                "needs_workspace": target.needs_workspace,
+            }
+            if target
+            else None
+        ),
         "required_json_schema": {
             "title": "short task title",
             "intent": intents,
@@ -289,6 +345,15 @@ def generation_messages(
             "Make the request concrete: name the input, output, artifact, bug, review target, or decision the user needs.",
         ],
     }
+    if target:
+        user["style_rules"].extend(
+            [
+                f"Set intent exactly to {target.intent}.",
+                f"Set language exactly to {target.language}.",
+                f"Set needs_workspace exactly to {str(target.needs_workspace).lower()}.",
+                "Do not change the target fields even if another task type seems easier.",
+            ]
+        )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
@@ -423,13 +488,25 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return payload
 
 
-def deterministic_task(persona: PersonaRecord, *, intents: list[str], languages: list[str], index: int) -> dict[str, Any]:
+def deterministic_task(
+    persona: PersonaRecord,
+    *,
+    intents: list[str],
+    languages: list[str],
+    index: int,
+    target: TaskTarget | None = None,
+) -> dict[str, Any]:
     brief = persona_brief(persona)
     occupation = human_occupation(brief.get("occupation"))
     focus = persona_focus(brief, occupation=occupation, index=index)
-    intent = intents[index % len(intents)]
-    language = languages[index % len(languages)]
-    needs_workspace = intent in WORKSPACE_INTENTS
+    if target is None:
+        intent = intents[index % len(intents)]
+        language = languages[index % len(languages)]
+        needs_workspace = intent in WORKSPACE_INTENTS
+    else:
+        intent = target.intent
+        language = target.language
+        needs_workspace = target.needs_workspace
     if needs_workspace and language == "none":
         language = "python" if "python" in languages else next((item for item in languages if item != "none"), "python")
     if needs_workspace:
@@ -590,6 +667,19 @@ def generated_task_quality_errors(task: dict[str, Any]) -> list[str]:
     return errors
 
 
+def target_mismatch_errors(task: dict[str, Any], target: TaskTarget | None) -> list[str]:
+    if target is None:
+        return []
+    errors: list[str] = []
+    if task.get("intent") != target.intent:
+        errors.append(f"intent does not match target {target.intent}")
+    if task.get("language") != target.language:
+        errors.append(f"language does not match target {target.language}")
+    if bool(task.get("needs_workspace")) != target.needs_workspace:
+        errors.append(f"needs_workspace does not match target {target.needs_workspace}")
+    return errors
+
+
 def pi_prompt(task: dict[str, Any]) -> str:
     request = task["user_request"].strip()
     if task["needs_workspace"]:
@@ -669,20 +759,23 @@ def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> li
         raise ValueError("--intents must include at least one value")
     if not languages:
         raise ValueError("--languages must include at least one value")
-    structured_schema = None
-    if not args.no_json_mode and args.structured_output:
-        structured_schema = task_response_schema(intents=intents, languages=languages)
     rows: list[dict[str, Any]] = []
     api_key = os.environ.get(args.api_key_env)
     if args.provider == "openrouter" and not args.dry_run and not api_key:
         raise SystemExit(f"{args.api_key_env} is not set")
 
     for index, persona in enumerate(progress(personas, total=len(personas), desc="generate tasks"), 1):
+        target = generation_target(index, intents=intents, languages=languages) if args.balance_targets else None
+        schema_intents = [target.intent] if target else intents
+        schema_languages = [target.language] if target else languages
+        structured_schema = None
+        if not args.no_json_mode and args.structured_output:
+            structured_schema = task_response_schema(intents=schema_intents, languages=schema_languages)
         if args.dry_run:
-            generated = deterministic_task(persona, intents=intents, languages=languages, index=index)
+            generated = deterministic_task(persona, intents=intents, languages=languages, index=index, target=target)
         else:
             assert api_key is not None
-            messages = generation_messages(persona, intents=intents, languages=languages)
+            messages = generation_messages(persona, intents=schema_intents, languages=schema_languages, target=target)
             last_error: Exception | None = None
             for attempt in range(args.retries + 1):
                 try:
@@ -697,7 +790,7 @@ def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> li
                         timeout_sec=args.request_timeout_sec,
                     )
                     generated = normalize_generated_task(extract_json_object(content), intents=intents, languages=languages)
-                    quality_errors = generated_task_quality_errors(generated)
+                    quality_errors = generated_task_quality_errors(generated) + target_mismatch_errors(generated, target)
                     if quality_errors:
                         raise ValueError("generated task failed quality gate: " + "; ".join(quality_errors))
                     break
@@ -705,7 +798,13 @@ def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> li
                     last_error = exc
                     if attempt >= args.retries:
                         if args.fallback_on_error:
-                            generated = deterministic_task(persona, intents=intents, languages=languages, index=index)
+                            generated = deterministic_task(
+                                persona,
+                                intents=intents,
+                                languages=languages,
+                                index=index,
+                                target=target,
+                            )
                             generated["generation_error"] = repr(last_error)
                             break
                         raise
@@ -778,6 +877,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="structured_output",
         action="store_false",
         help="Use plain JSON mode instead of strict JSON Schema mode.",
+    )
+    parser.set_defaults(balance_targets=True)
+    parser.add_argument(
+        "--balance-targets",
+        dest="balance_targets",
+        action="store_true",
+        help="Assign balanced intent/language targets to each persona. This is the default.",
+    )
+    parser.add_argument(
+        "--no-balance-targets",
+        dest="balance_targets",
+        action="store_false",
+        help="Let the task generator choose intent/language freely.",
     )
     parser.set_defaults(fallback_on_error=True)
     parser.add_argument(

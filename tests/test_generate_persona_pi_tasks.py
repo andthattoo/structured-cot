@@ -84,6 +84,46 @@ def test_task_response_schema_is_strict_and_enum_bounded() -> None:
     assert schema["properties"]["language"]["enum"] == ["python", "none"]
 
 
+def test_generation_target_balances_intent_and_compatible_language() -> None:
+    intents = ["build", "automation", "debug", "design", "review", "how_to", "data_transform"]
+    languages = ["python", "javascript", "typescript", "cpp", "shell", "mixed", "none"]
+
+    targets = [
+        generate_persona_pi_tasks.generation_target(index, intents=intents, languages=languages)
+        for index in range(1, 8)
+    ]
+
+    assert [target.intent for target in targets] == intents
+    assert [target.needs_workspace for target in targets] == [True, True, False, False, False, False, True]
+    assert targets[0].language == "python"
+    assert targets[1].language == "shell"
+    assert targets[2].language == "typescript"
+    assert targets[3].language == "cpp"
+    assert targets[4].language == "mixed"
+    assert targets[5].language == "none"
+    assert targets[6].language == "python"
+
+
+def test_generation_messages_include_target_contract() -> None:
+    persona = generate_persona_pi_tasks.PersonaRecord(persona_id="abc123", row=persona_row())
+    target = generate_persona_pi_tasks.TaskTarget(intent="review", language="mixed", needs_workspace=False)
+
+    messages = generate_persona_pi_tasks.generation_messages(
+        persona,
+        intents=["review"],
+        languages=["mixed"],
+        target=target,
+    )
+    payload = json.loads(messages[1]["content"])
+
+    assert payload["target"] == {
+        "intent": "review",
+        "language": "mixed",
+        "needs_workspace": False,
+    }
+    assert "Set intent exactly to review." in payload["style_rules"]
+
+
 def test_openrouter_chat_sends_structured_output_schema(monkeypatch) -> None:
     captured = {}
 
@@ -259,6 +299,7 @@ def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypa
             "max_tokens": 100,
             "no_json_mode": False,
             "structured_output": True,
+            "balance_targets": True,
             "request_timeout_sec": 1.0,
             "retry_sleep_sec": 0.0,
             "start_index": 0,
@@ -274,6 +315,58 @@ def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypa
     assert rows[0]["language"] == "python"
     assert rows[0]["task_generation_fallback"] is True
     assert "empty message" in rows[0]["task_generation_error"]
+
+
+def test_generate_rows_dry_run_uses_balanced_targets(tmp_path: Path) -> None:
+    personas = [
+        generate_persona_pi_tasks.PersonaRecord(persona_id=f"abc{index}", row=persona_row())
+        for index in range(7)
+    ]
+    args = type(
+        "Args",
+        (),
+        {
+            "intents": "build,automation,debug,design,review,how_to,data_transform",
+            "languages": "python,javascript,typescript,cpp,shell,mixed,none",
+            "provider": "openrouter",
+            "dry_run": True,
+            "api_key_env": "OPENROUTER_API_KEY",
+            "retries": 0,
+            "fallback_on_error": True,
+            "model": "test-model",
+            "temperature": 0.1,
+            "max_tokens": 100,
+            "no_json_mode": False,
+            "structured_output": True,
+            "balance_targets": True,
+            "request_timeout_sec": 1.0,
+            "retry_sleep_sec": 0.0,
+            "start_index": 0,
+            "root_dir": tmp_path,
+            "source": "test",
+        },
+    )()
+
+    rows = generate_persona_pi_tasks.generate_rows(args, personas)
+
+    assert [row["intent"] for row in rows] == [
+        "build",
+        "automation",
+        "debug",
+        "design",
+        "review",
+        "how_to",
+        "data_transform",
+    ]
+    assert [row["language"] for row in rows] == [
+        "python",
+        "shell",
+        "typescript",
+        "cpp",
+        "mixed",
+        "none",
+        "python",
+    ]
 
 
 def test_task_row_is_pi_compatible_and_empty_workspace_prompt(tmp_path: Path) -> None:
