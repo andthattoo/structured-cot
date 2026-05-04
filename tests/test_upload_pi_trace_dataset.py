@@ -40,8 +40,13 @@ def test_build_upload_tree_indexes_successful_sessions(tmp_path: Path) -> None:
                 "rpc_events_file": str(rpc_file),
                 "stderr_file": str(stderr_file),
                 "elapsed_sec": 3.5,
+                "started_at": "2026-05-04T00:00:00+00:00",
+                "ended_at": "2026-05-04T00:00:03+00:00",
                 "error": None,
+                "pi_command": ["pi", "--provider", "openrouter", "--model", "qwen/qwen3.5-27b"],
                 "task": {
+                    "prompt": "Do the task.",
+                    "cwd": "/tmp/work",
                     "thinking_level": "minimal",
                     "metadata": {
                         "base_task_id": "task",
@@ -50,6 +55,13 @@ def test_build_upload_tree_indexes_successful_sessions(tmp_path: Path) -> None:
                         "domain": "python",
                         "source": "test",
                         "verifiable": False,
+                        "persona_id": "persona_a",
+                        "intent": "build",
+                        "language": "python",
+                        "needs_workspace": True,
+                        "difficulty": "easy",
+                        "generator_model": "task-gen",
+                        "task_generation_fallback": False,
                     },
                 },
             }
@@ -79,6 +91,20 @@ def test_build_upload_tree_indexes_successful_sessions(tmp_path: Path) -> None:
     assert index_rows[0]["task_id"] == "task_a"
     assert index_rows[0]["session_path"] == "runs/run_1/sessions/reconstructed/task_a.jsonl"
     assert index_rows[0]["thinking_level"] == "minimal"
+    assert index_rows[0]["prompt"] == "Do the task."
+    assert index_rows[0]["provider"] == "openrouter"
+    assert index_rows[0]["model"] == "qwen/qwen3.5-27b"
+    assert index_rows[0]["intent"] == "build"
+    assert index_rows[0]["language"] == "python"
+    assert index_rows[0]["persona_id"] == "persona_a"
+
+
+def test_dataset_card_points_viewer_at_index_only() -> None:
+    card = upload_pi_trace_dataset.dataset_card("user/repo")
+
+    assert "configs:" in card
+    assert "path: index/*.jsonl" in card
+    assert "sessions" in card
 
 
 def test_build_upload_tree_skips_errors_by_default(tmp_path: Path) -> None:

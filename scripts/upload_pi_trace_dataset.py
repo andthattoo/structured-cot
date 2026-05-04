@@ -55,6 +55,19 @@ def copy_trace_file(trace_dir: Path, staging_dir: Path, run_id: str, rel_path: P
     return dst_rel.as_posix()
 
 
+def command_value(command: Any, flag: str) -> str | None:
+    if not isinstance(command, list):
+        return None
+    try:
+        index = command.index(flag)
+    except ValueError:
+        return None
+    if index + 1 >= len(command):
+        return None
+    value = command[index + 1]
+    return str(value) if value is not None else None
+
+
 def dataset_card(repo_id: str) -> str:
     return f"""---
 license: apache-2.0
@@ -67,17 +80,27 @@ tags:
 - agent-traces
 - efficient-thinking
 - code-agent
+configs:
+- config_name: default
+  data_files:
+  - split: train
+    path: index/*.jsonl
 ---
 
 # ETPI Pi Traces
 
 Append-only Pi RPC trace dataset for efficient-thinker experiments.
 
+The Hugging Face dataset viewer is intentionally pointed at `index/*.jsonl`
+only. The full Pi session JSONL files under `runs/<run_id>/sessions/...` are
+stored as artifacts and linked from the index; they are not meant to be parsed
+as top-level tabular rows by the viewer.
+
 Each upload adds:
 
 - `runs/<run_id>/manifest.jsonl`: original run manifest.
 - `runs/<run_id>/sessions/...`: Pi session JSONL, usually reconstructed from RPC events.
-- `index/<run_id>.jsonl`: compact index pointing to usable session files.
+- `index/<run_id>.jsonl`: viewer-friendly index pointing to usable session files.
 
 Dataset repo: `{repo_id}`.
 """
@@ -132,16 +155,23 @@ def build_upload_tree(
 
         task = row.get("task") if isinstance(row.get("task"), dict) else {}
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        pi_command = row.get("pi_command")
         index_rows.append(
             {
                 "run_id": run_id,
                 "task_id": row.get("task_id"),
                 "status": status,
+                "prompt": task.get("prompt"),
+                "cwd": task.get("cwd"),
                 "session_path": session_path,
                 "rpc_events_path": rpc_path,
                 "stderr_path": stderr_path,
                 "manifest_path": f"runs/{run_id}/manifest.jsonl",
+                "provider": command_value(pi_command, "--provider"),
+                "model": command_value(pi_command, "--model"),
                 "elapsed_sec": row.get("elapsed_sec"),
+                "started_at": row.get("started_at"),
+                "ended_at": row.get("ended_at"),
                 "error": row.get("error"),
                 "thinking_level": task.get("thinking_level"),
                 "base_task_id": metadata.get("base_task_id"),
@@ -150,6 +180,13 @@ def build_upload_tree(
                 "domain": metadata.get("domain"),
                 "source": metadata.get("source"),
                 "verifiable": metadata.get("verifiable"),
+                "persona_id": metadata.get("persona_id"),
+                "intent": metadata.get("intent"),
+                "language": metadata.get("language"),
+                "needs_workspace": metadata.get("needs_workspace"),
+                "difficulty": metadata.get("difficulty"),
+                "generator_model": metadata.get("generator_model"),
+                "task_generation_fallback": metadata.get("task_generation_fallback"),
             }
         )
 
