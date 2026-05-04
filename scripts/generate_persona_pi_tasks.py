@@ -754,6 +754,27 @@ def create_workspaces(rows: list[dict[str, Any]]) -> int:
     return count
 
 
+def fallback_count(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if row.get("task_generation_fallback") is True)
+
+
+def fallback_rate(rows: list[dict[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    return fallback_count(rows) / len(rows)
+
+
+def enforce_fallback_rate(rows: list[dict[str, Any]], *, max_fallback_rate: float | None) -> None:
+    if max_fallback_rate is None:
+        return
+    rate = fallback_rate(rows)
+    if rate > max_fallback_rate:
+        raise RuntimeError(
+            f"fallback rate {rate:.3f} exceeded --max-fallback-rate {max_fallback_rate:.3f} "
+            f"({fallback_count(rows)}/{len(rows)} rows)"
+        )
+
+
 def generate_one_row(
     *,
     args: argparse.Namespace,
@@ -917,6 +938,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1,
         help="Number of concurrent task-generation requests. Keep modest to avoid provider rate limits.",
     )
+    parser.add_argument(
+        "--max-fallback-rate",
+        type=float,
+        default=1.0,
+        help="Fail after generation if the fraction of deterministic fallback rows exceeds this value.",
+    )
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--retry-sleep-sec", type=float, default=2.0)
     parser.set_defaults(structured_output=True)
@@ -980,6 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     rows = generate_rows(args, personas)
+    enforce_fallback_rate(rows, max_fallback_rate=args.max_fallback_rate)
     write_jsonl(args.out, rows)
     created = create_workspaces(rows) if args.create_workspaces else 0
     print(
@@ -988,6 +1016,8 @@ def main(argv: list[str] | None = None) -> int:
                 "out": str(args.out),
                 "personas": len(personas),
                 "tasks": len(rows),
+                "fallback": fallback_count(rows),
+                "fallback_rate": fallback_rate(rows),
                 "workspaces_created": created,
             },
             sort_keys=True,

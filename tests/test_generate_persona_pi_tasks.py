@@ -317,6 +317,29 @@ def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypa
     assert rows[0]["language"] == "python"
     assert rows[0]["task_generation_fallback"] is True
     assert "empty message" in rows[0]["task_generation_error"]
+    assert generate_persona_pi_tasks.fallback_count(rows) == 1
+    assert generate_persona_pi_tasks.fallback_rate(rows) == 1.0
+
+
+def test_enforce_fallback_rate_rejects_bad_batches() -> None:
+    rows = [
+        {"task_generation_fallback": True},
+        {"task_generation_fallback": False},
+    ]
+
+    try:
+        generate_persona_pi_tasks.enforce_fallback_rate(rows, max_fallback_rate=0.25)
+    except RuntimeError as exc:
+        assert "fallback rate" in str(exc)
+    else:
+        raise AssertionError("fallback rate guard should reject excessive fallback rows")
+
+
+def test_enforce_fallback_rate_accepts_none() -> None:
+    generate_persona_pi_tasks.enforce_fallback_rate(
+        [{"task_generation_fallback": True}],
+        max_fallback_rate=None,
+    )
 
 
 def test_generate_rows_dry_run_uses_balanced_targets(tmp_path: Path) -> None:
@@ -342,6 +365,7 @@ def test_generate_rows_dry_run_uses_balanced_targets(tmp_path: Path) -> None:
             "structured_output": True,
             "balance_targets": True,
             "concurrency": 1,
+            "max_fallback_rate": 1.0,
             "request_timeout_sec": 1.0,
             "retry_sleep_sec": 0.0,
             "start_index": 0,
