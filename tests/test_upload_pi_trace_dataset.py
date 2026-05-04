@@ -97,6 +97,8 @@ def test_build_upload_tree_indexes_successful_sessions(tmp_path: Path) -> None:
     assert index_rows[0]["intent"] == "build"
     assert index_rows[0]["language"] == "python"
     assert index_rows[0]["persona_id"] == "persona_a"
+    assert all(value is not None for value in index_rows[0].values())
+    assert set(index_rows[0]) == set(upload_pi_trace_dataset.INDEX_COLUMNS)
 
 
 def test_dataset_card_points_viewer_at_index_only() -> None:
@@ -105,6 +107,7 @@ def test_dataset_card_points_viewer_at_index_only() -> None:
     assert "configs:" in card
     assert "path: index/*.jsonl" in card
     assert "sessions" in card
+    assert "stable, non-null schema" in card
 
 
 def test_build_upload_tree_skips_errors_by_default(tmp_path: Path) -> None:
@@ -124,3 +127,34 @@ def test_build_upload_tree_skips_errors_by_default(tmp_path: Path) -> None:
 
     assert stats["rows"] == 1
     assert stats["indexed_rows"] == 0
+
+
+def test_normalize_index_file_adds_stable_schema(tmp_path: Path) -> None:
+    index_path = tmp_path / "old.jsonl"
+    index_path.write_text(
+        json.dumps(
+            {
+                "run_id": "old",
+                "task_id": "task_a",
+                "status": "ok",
+                "session_path": "runs/old/sessions/task_a.jsonl",
+                "rpc_events_path": None,
+                "stderr_path": None,
+                "elapsed_sec": "4.25",
+                "error": None,
+                "verifiable": None,
+            }
+        )
+        + "\n"
+    )
+
+    upload_pi_trace_dataset.normalize_index_file(index_path)
+
+    row = json.loads(index_path.read_text())
+    assert set(row) == set(upload_pi_trace_dataset.INDEX_COLUMNS)
+    assert row["rpc_events_path"] == ""
+    assert row["stderr_path"] == ""
+    assert row["error"] == ""
+    assert row["elapsed_sec"] == 4.25
+    assert row["verifiable"] is False
+    assert row["persona_id"] == ""

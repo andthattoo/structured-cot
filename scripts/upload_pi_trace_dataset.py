@@ -15,6 +15,67 @@ from typing import Any
 
 RUN_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
+INDEX_STRING_COLUMNS = {
+    "run_id",
+    "task_id",
+    "status",
+    "prompt",
+    "cwd",
+    "session_path",
+    "rpc_events_path",
+    "stderr_path",
+    "manifest_path",
+    "provider",
+    "model",
+    "started_at",
+    "ended_at",
+    "error",
+    "thinking_level",
+    "base_task_id",
+    "repo_id",
+    "repo_name",
+    "domain",
+    "source",
+    "persona_id",
+    "intent",
+    "language",
+    "difficulty",
+    "generator_model",
+}
+INDEX_FLOAT_COLUMNS = {"elapsed_sec"}
+INDEX_BOOL_COLUMNS = {"verifiable", "needs_workspace", "task_generation_fallback"}
+INDEX_COLUMNS = [
+    "run_id",
+    "task_id",
+    "status",
+    "prompt",
+    "cwd",
+    "session_path",
+    "rpc_events_path",
+    "stderr_path",
+    "manifest_path",
+    "provider",
+    "model",
+    "elapsed_sec",
+    "started_at",
+    "ended_at",
+    "error",
+    "thinking_level",
+    "base_task_id",
+    "repo_id",
+    "repo_name",
+    "domain",
+    "source",
+    "verifiable",
+    "persona_id",
+    "intent",
+    "language",
+    "needs_workspace",
+    "difficulty",
+    "generator_model",
+    "task_generation_fallback",
+]
+
 
 def slug(value: str, fallback: str = "run") -> str:
     cleaned = RUN_ID_RE.sub("_", value.strip()).strip("._-")
@@ -32,6 +93,41 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"{path}:{line_no}: expected JSON object")
             rows.append(row)
     return rows
+
+
+def coerce_index_value(column: str, value: Any) -> str | float | bool:
+    """Keep every index file on one HF-inferable schema.
+
+    The Hugging Face JSON viewer infers a schema across `index/*.jsonl`.
+    A missing text value encoded as JSON null can make an entire column infer
+    as `null` in a run that has no persona metadata, then fail when another run
+    has strings. Empty strings preserve the intended string type.
+    """
+    if column in INDEX_BOOL_COLUMNS:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y"}
+        return bool(value) if value is not None else False
+    if column in INDEX_FLOAT_COLUMNS:
+        if value in (None, ""):
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    if column in INDEX_STRING_COLUMNS:
+        return "" if value is None else str(value)
+    return "" if value is None else str(value)
+
+
+def normalize_index_row(row: dict[str, Any]) -> dict[str, str | float | bool]:
+    return {column: coerce_index_value(column, row.get(column)) for column in INDEX_COLUMNS}
+
+
+def normalize_index_file(path: Path) -> None:
+    rows = read_jsonl(path)
+    with path.open("w") as f:
+        for row in rows:
+            f.write(json.dumps(normalize_index_row(row), ensure_ascii=False) + "\n")
 
 
 def relative_to_trace(path_value: str | None, trace_dir: Path) -> Path | None:
@@ -102,6 +198,9 @@ Each upload adds:
 - `runs/<run_id>/sessions/...`: Pi session JSONL, usually reconstructed from RPC events.
 - `index/<run_id>.jsonl`: viewer-friendly index pointing to usable session files.
 
+The index files intentionally use one stable, non-null schema across all runs
+so the dataset viewer can stream mixed public-repo and persona traces together.
+
 Dataset repo: `{repo_id}`.
 """
 
@@ -157,37 +256,39 @@ def build_upload_tree(
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
         pi_command = row.get("pi_command")
         index_rows.append(
-            {
-                "run_id": run_id,
-                "task_id": row.get("task_id"),
-                "status": status,
-                "prompt": task.get("prompt"),
-                "cwd": task.get("cwd"),
-                "session_path": session_path,
-                "rpc_events_path": rpc_path,
-                "stderr_path": stderr_path,
-                "manifest_path": f"runs/{run_id}/manifest.jsonl",
-                "provider": command_value(pi_command, "--provider"),
-                "model": command_value(pi_command, "--model"),
-                "elapsed_sec": row.get("elapsed_sec"),
-                "started_at": row.get("started_at"),
-                "ended_at": row.get("ended_at"),
-                "error": row.get("error"),
-                "thinking_level": task.get("thinking_level"),
-                "base_task_id": metadata.get("base_task_id"),
-                "repo_id": metadata.get("repo_id"),
-                "repo_name": metadata.get("repo_name"),
-                "domain": metadata.get("domain"),
-                "source": metadata.get("source"),
-                "verifiable": metadata.get("verifiable"),
-                "persona_id": metadata.get("persona_id"),
-                "intent": metadata.get("intent"),
-                "language": metadata.get("language"),
-                "needs_workspace": metadata.get("needs_workspace"),
-                "difficulty": metadata.get("difficulty"),
-                "generator_model": metadata.get("generator_model"),
-                "task_generation_fallback": metadata.get("task_generation_fallback"),
-            }
+            normalize_index_row(
+                {
+                    "run_id": run_id,
+                    "task_id": row.get("task_id"),
+                    "status": status,
+                    "prompt": task.get("prompt"),
+                    "cwd": task.get("cwd"),
+                    "session_path": session_path,
+                    "rpc_events_path": rpc_path,
+                    "stderr_path": stderr_path,
+                    "manifest_path": f"runs/{run_id}/manifest.jsonl",
+                    "provider": command_value(pi_command, "--provider"),
+                    "model": command_value(pi_command, "--model"),
+                    "elapsed_sec": row.get("elapsed_sec"),
+                    "started_at": row.get("started_at"),
+                    "ended_at": row.get("ended_at"),
+                    "error": row.get("error"),
+                    "thinking_level": task.get("thinking_level"),
+                    "base_task_id": metadata.get("base_task_id"),
+                    "repo_id": metadata.get("repo_id"),
+                    "repo_name": metadata.get("repo_name"),
+                    "domain": metadata.get("domain"),
+                    "source": metadata.get("source"),
+                    "verifiable": metadata.get("verifiable"),
+                    "persona_id": metadata.get("persona_id"),
+                    "intent": metadata.get("intent"),
+                    "language": metadata.get("language"),
+                    "needs_workspace": metadata.get("needs_workspace"),
+                    "difficulty": metadata.get("difficulty"),
+                    "generator_model": metadata.get("generator_model"),
+                    "task_generation_fallback": metadata.get("task_generation_fallback"),
+                }
+            )
         )
 
     index_path = staging_dir / "index" / f"{run_id}.jsonl"
@@ -218,9 +319,30 @@ def upload_folder(
     token: str | None,
 ) -> None:
     from huggingface_hub import HfApi
+    from huggingface_hub import hf_hub_download
 
     api = HfApi(token=token)
     api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=private)
+
+    for repo_path in api.list_repo_files(repo_id=repo_id, repo_type="dataset", token=token):
+        if not repo_path.startswith("index/") or not repo_path.endswith(".jsonl"):
+            continue
+
+        staged_path = staging_dir / repo_path
+        if not staged_path.exists():
+            cached_path = Path(
+                hf_hub_download(
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    filename=repo_path,
+                    token=token,
+                )
+            )
+            staged_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(cached_path, staged_path)
+
+        normalize_index_file(staged_path)
+
     api.upload_folder(
         repo_id=repo_id,
         repo_type="dataset",
