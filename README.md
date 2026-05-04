@@ -149,6 +149,20 @@ Each repo gets architecture, reproduction, core-flow, test-map, critic,
 debug-plan, small-edit-plan, API-surface, and one domain-specific task. These
 first-stage tasks are behavior/style traces, not verifier-backed RL tasks.
 
+For a larger read-only open-repo batch, use the expanded taxonomy:
+
+```bash
+python3 scripts/make_etpi_repo_tasks.py \
+  --root-dir /root/etpi-repos \
+  --profile expanded \
+  --out data/pi_tasks/etpi_public_repo_tasks_expanded_v1.jsonl
+```
+
+This adds repo-grounded tasks such as dependency mapping, configuration
+mapping, extension-point discovery, error-handling traces, test-gap analysis,
+issue triage, release risk, performance scans, and domain-specific Python,
+TypeScript, or C++ inspection tasks.
+
 ### Persona-conditioned task generation
 
 Use an LLM to turn sampled personas into realistic single-turn coding-agent
