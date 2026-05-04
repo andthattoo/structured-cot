@@ -342,6 +342,15 @@ def test_enforce_fallback_rate_accepts_none() -> None:
     )
 
 
+def test_validate_model_name_rejects_placeholder() -> None:
+    try:
+        generate_persona_pi_tasks.validate_model_name("<your-alt-model>")
+    except SystemExit as exc:
+        assert "replace the placeholder" in str(exc)
+    else:
+        raise AssertionError("placeholder model id should be rejected")
+
+
 def test_generate_rows_dry_run_uses_balanced_targets(tmp_path: Path) -> None:
     personas = [
         generate_persona_pi_tasks.PersonaRecord(persona_id=f"abc{index}", row=persona_row())

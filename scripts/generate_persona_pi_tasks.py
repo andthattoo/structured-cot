@@ -764,6 +764,13 @@ def fallback_rate(rows: list[dict[str, Any]]) -> float:
     return fallback_count(rows) / len(rows)
 
 
+def validate_model_name(model: str) -> None:
+    if "<" in model or ">" in model or model.strip() in {"", "MODEL", "model", "your-alt-model"}:
+        raise SystemExit(
+            f"invalid --model value {model!r}; replace the placeholder with a real OpenRouter model id"
+        )
+
+
 def enforce_fallback_rate(rows: list[dict[str, Any]], *, max_fallback_rate: float | None) -> None:
     if max_fallback_rate is None:
         return
@@ -843,18 +850,16 @@ def generate_one_row(
 
 
 def print_row_progress(row: dict[str, Any]) -> None:
-    print(
-        json.dumps(
-            {
-                "task_id": row["task_id"],
-                "intent": row["intent"],
-                "language": row["language"],
-                "needs_workspace": row["needs_workspace"],
-            },
-            sort_keys=True,
-        ),
-        flush=True,
-    )
+    payload = {
+        "task_id": row["task_id"],
+        "intent": row["intent"],
+        "language": row["language"],
+        "needs_workspace": row["needs_workspace"],
+        "fallback": row["task_generation_fallback"],
+    }
+    if row.get("task_generation_error"):
+        payload["error"] = str(row["task_generation_error"])[:220]
+    print(json.dumps(payload, sort_keys=True), flush=True)
 
 
 def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> list[dict[str, Any]]:
@@ -994,6 +999,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    validate_model_name(args.model)
     if args.personas_file:
         personas = load_personas_from_file(args.personas_file, sample_size=args.sample_size, seed=args.seed)
     else:
