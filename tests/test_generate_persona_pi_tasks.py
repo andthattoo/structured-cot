@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 
@@ -300,6 +301,7 @@ def test_generate_rows_can_fallback_on_generation_error(tmp_path: Path, monkeypa
             "no_json_mode": False,
             "structured_output": True,
             "balance_targets": True,
+            "concurrency": 1,
             "request_timeout_sec": 1.0,
             "retry_sleep_sec": 0.0,
             "start_index": 0,
@@ -339,6 +341,7 @@ def test_generate_rows_dry_run_uses_balanced_targets(tmp_path: Path) -> None:
             "no_json_mode": False,
             "structured_output": True,
             "balance_targets": True,
+            "concurrency": 1,
             "request_timeout_sec": 1.0,
             "retry_sleep_sec": 0.0,
             "start_index": 0,
@@ -367,6 +370,71 @@ def test_generate_rows_dry_run_uses_balanced_targets(tmp_path: Path) -> None:
         "none",
         "python",
     ]
+
+
+def test_generate_rows_parallel_preserves_output_order(tmp_path: Path, monkeypatch) -> None:
+    personas = [
+        generate_persona_pi_tasks.PersonaRecord(persona_id=f"abc{index}", row=persona_row())
+        for index in range(4)
+    ]
+
+    def fake_openrouter_chat(**kwargs):
+        target = json.loads(kwargs["messages"][1]["content"])["target"]
+        if target["intent"] == "build":
+            time.sleep(0.03)
+        expected_artifacts = ["README.md"] if target["needs_workspace"] else []
+        request = (
+            "Please build a small local tool with README and tests."
+            if target["needs_workspace"]
+            else "I need a concrete coding-agent plan with assumptions and a small example."
+        )
+        return json.dumps(
+            {
+                "title": f"{target['intent']} task",
+                "intent": target["intent"],
+                "language": target["language"],
+                "needs_workspace": target["needs_workspace"],
+                "user_request": request,
+                "expected_artifacts": expected_artifacts,
+                "verify_commands": [],
+                "difficulty": "easy",
+            }
+        )
+
+    monkeypatch.setattr(generate_persona_pi_tasks, "openrouter_chat", fake_openrouter_chat)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+
+    args = type(
+        "Args",
+        (),
+        {
+            "intents": "build,automation,debug,design",
+            "languages": "python,javascript,typescript,cpp,shell,mixed,none",
+            "provider": "openrouter",
+            "dry_run": False,
+            "api_key_env": "OPENROUTER_API_KEY",
+            "retries": 0,
+            "fallback_on_error": False,
+            "model": "test-model",
+            "temperature": 0.1,
+            "max_tokens": 100,
+            "no_json_mode": False,
+            "structured_output": True,
+            "balance_targets": True,
+            "concurrency": 4,
+            "request_timeout_sec": 1.0,
+            "retry_sleep_sec": 0.0,
+            "start_index": 0,
+            "root_dir": tmp_path,
+            "source": "test",
+        },
+    )()
+
+    rows = generate_persona_pi_tasks.generate_rows(args, personas)
+
+    assert [row["intent"] for row in rows] == ["build", "automation", "debug", "design"]
+    assert [row["language"] for row in rows] == ["python", "shell", "typescript", "cpp"]
+    assert [row["task_id"].split("_")[1] for row in rows] == ["000001", "000002", "000003", "000004"]
 
 
 def test_task_row_is_pi_compatible_and_empty_workspace_prompt(tmp_path: Path) -> None:

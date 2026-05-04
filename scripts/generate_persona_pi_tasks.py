@@ -16,6 +16,8 @@ import re
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -752,6 +754,88 @@ def create_workspaces(rows: list[dict[str, Any]]) -> int:
     return count
 
 
+def generate_one_row(
+    *,
+    args: argparse.Namespace,
+    persona: PersonaRecord,
+    index: int,
+    intents: list[str],
+    languages: list[str],
+    api_key: str | None,
+) -> dict[str, Any]:
+    target = generation_target(index, intents=intents, languages=languages) if args.balance_targets else None
+    schema_intents = [target.intent] if target else intents
+    schema_languages = [target.language] if target else languages
+    structured_schema = None
+    if not args.no_json_mode and args.structured_output:
+        structured_schema = task_response_schema(intents=schema_intents, languages=schema_languages)
+    if args.dry_run:
+        generated = deterministic_task(persona, intents=intents, languages=languages, index=index, target=target)
+    else:
+        assert api_key is not None
+        messages = generation_messages(persona, intents=schema_intents, languages=schema_languages, target=target)
+        last_error: Exception | None = None
+        for attempt in range(args.retries + 1):
+            try:
+                content = openrouter_chat(
+                    model=args.model,
+                    messages=messages,
+                    api_key=api_key,
+                    temperature=args.temperature,
+                    max_tokens=args.max_tokens,
+                    json_mode=not args.no_json_mode,
+                    structured_schema=structured_schema,
+                    timeout_sec=args.request_timeout_sec,
+                )
+                generated = normalize_generated_task(extract_json_object(content), intents=intents, languages=languages)
+                quality_errors = generated_task_quality_errors(generated) + target_mismatch_errors(generated, target)
+                if quality_errors:
+                    raise ValueError("generated task failed quality gate: " + "; ".join(quality_errors))
+                break
+            except Exception as exc:  # noqa: BLE001 - report retryable API/parsing errors.
+                last_error = exc
+                if attempt >= args.retries:
+                    if args.fallback_on_error:
+                        generated = deterministic_task(
+                            persona,
+                            intents=intents,
+                            languages=languages,
+                            index=index,
+                            target=target,
+                        )
+                        generated["generation_error"] = repr(last_error)
+                        break
+                    raise
+                time.sleep(args.retry_sleep_sec * (attempt + 1))
+        else:
+            raise RuntimeError(last_error)
+    return task_row(
+        persona,
+        generated,
+        index=index + args.start_index,
+        root_dir=args.root_dir.expanduser(),
+        source=args.source,
+        generator_model=args.model,
+        intents=intents,
+        languages=languages,
+    )
+
+
+def print_row_progress(row: dict[str, Any]) -> None:
+    print(
+        json.dumps(
+            {
+                "task_id": row["task_id"],
+                "intent": row["intent"],
+                "language": row["language"],
+                "needs_workspace": row["needs_workspace"],
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> list[dict[str, Any]]:
     intents = split_csv(args.intents)
     languages = split_csv(args.languages)
@@ -764,77 +848,41 @@ def generate_rows(args: argparse.Namespace, personas: list[PersonaRecord]) -> li
     if args.provider == "openrouter" and not args.dry_run and not api_key:
         raise SystemExit(f"{args.api_key_env} is not set")
 
-    for index, persona in enumerate(progress(personas, total=len(personas), desc="generate tasks"), 1):
-        target = generation_target(index, intents=intents, languages=languages) if args.balance_targets else None
-        schema_intents = [target.intent] if target else intents
-        schema_languages = [target.language] if target else languages
-        structured_schema = None
-        if not args.no_json_mode and args.structured_output:
-            structured_schema = task_response_schema(intents=schema_intents, languages=schema_languages)
-        if args.dry_run:
-            generated = deterministic_task(persona, intents=intents, languages=languages, index=index, target=target)
-        else:
-            assert api_key is not None
-            messages = generation_messages(persona, intents=schema_intents, languages=schema_languages, target=target)
-            last_error: Exception | None = None
-            for attempt in range(args.retries + 1):
-                try:
-                    content = openrouter_chat(
-                        model=args.model,
-                        messages=messages,
-                        api_key=api_key,
-                        temperature=args.temperature,
-                        max_tokens=args.max_tokens,
-                        json_mode=not args.no_json_mode,
-                        structured_schema=structured_schema,
-                        timeout_sec=args.request_timeout_sec,
-                    )
-                    generated = normalize_generated_task(extract_json_object(content), intents=intents, languages=languages)
-                    quality_errors = generated_task_quality_errors(generated) + target_mismatch_errors(generated, target)
-                    if quality_errors:
-                        raise ValueError("generated task failed quality gate: " + "; ".join(quality_errors))
-                    break
-                except Exception as exc:  # noqa: BLE001 - report retryable API/parsing errors.
-                    last_error = exc
-                    if attempt >= args.retries:
-                        if args.fallback_on_error:
-                            generated = deterministic_task(
-                                persona,
-                                intents=intents,
-                                languages=languages,
-                                index=index,
-                                target=target,
-                            )
-                            generated["generation_error"] = repr(last_error)
-                            break
-                        raise
-                    time.sleep(args.retry_sleep_sec * (attempt + 1))
-            else:
-                raise RuntimeError(last_error)
-        row = task_row(
-            persona,
-            generated,
-            index=index + args.start_index,
-            root_dir=args.root_dir.expanduser(),
-            source=args.source,
-            generator_model=args.model,
-            intents=intents,
-            languages=languages,
-        )
-        rows.append(row)
-        print(
-            json.dumps(
-                {
-                    "task_id": row["task_id"],
-                    "intent": row["intent"],
-                    "language": row["language"],
-                    "needs_workspace": row["needs_workspace"],
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
-    return rows
+    concurrency = max(1, args.concurrency)
+    if concurrency == 1:
+        for index, persona in enumerate(progress(personas, total=len(personas), desc="generate tasks"), 1):
+            row = generate_one_row(
+                args=args,
+                persona=persona,
+                index=index,
+                intents=intents,
+                languages=languages,
+                api_key=api_key,
+            )
+            rows.append(row)
+            print_row_progress(row)
+        return rows
+
+    rows_by_index: list[dict[str, Any] | None] = [None] * len(personas)
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {
+            executor.submit(
+                generate_one_row,
+                args=args,
+                persona=persona,
+                index=index,
+                intents=intents,
+                languages=languages,
+                api_key=api_key,
+            ): index
+            for index, persona in enumerate(personas, 1)
+        }
+        for future in progress(as_completed(futures), total=len(futures), desc="generate tasks"):
+            index = futures[future]
+            row = future.result()
+            rows_by_index[index - 1] = row
+            print_row_progress(row)
+    return [row for row in rows_by_index if row is not None]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -863,6 +911,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--max-tokens", type=int, default=900)
     parser.add_argument("--request-timeout-sec", type=float, default=120.0)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Number of concurrent task-generation requests. Keep modest to avoid provider rate limits.",
+    )
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--retry-sleep-sec", type=float, default=2.0)
     parser.set_defaults(structured_output=True)
