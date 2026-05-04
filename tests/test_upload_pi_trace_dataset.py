@@ -21,7 +21,10 @@ def test_build_upload_tree_indexes_successful_sessions(tmp_path: Path) -> None:
     session_dir = trace_dir / "sessions" / "reconstructed"
     session_dir.mkdir(parents=True)
     session_file = session_dir / "task_a.jsonl"
-    session_file.write_text(json.dumps({"type": "session"}) + "\n")
+    session_file.write_text(
+        json.dumps({"type": "session"}) + "\n"
+        + json.dumps({"type": "message", "role": "assistant", "content": "Done"}) + "\n"
+    )
     rpc_dir = trace_dir / "rpc-events"
     rpc_dir.mkdir()
     rpc_file = rpc_dir / "task_a.jsonl"
@@ -97,6 +100,11 @@ def test_build_upload_tree_indexes_successful_sessions(tmp_path: Path) -> None:
     assert index_rows[0]["intent"] == "build"
     assert index_rows[0]["language"] == "python"
     assert index_rows[0]["persona_id"] == "persona_a"
+    trajectory = json.loads(index_rows[0]["trajectory_json"])
+    assert trajectory == [
+        {"type": "session"},
+        {"type": "message", "role": "assistant", "content": "Done"},
+    ]
     assert all(value is not None for value in index_rows[0].values())
     assert set(index_rows[0]) == set(upload_pi_trace_dataset.INDEX_COLUMNS)
 
@@ -106,6 +114,7 @@ def test_dataset_card_points_viewer_at_index_only() -> None:
 
     assert "configs:" in card
     assert "path: index/*.jsonl" in card
+    assert "trajectory_json" in card
     assert "sessions" in card
     assert "stable, non-null schema" in card
 
@@ -158,3 +167,4 @@ def test_normalize_index_file_adds_stable_schema(tmp_path: Path) -> None:
     assert row["elapsed_sec"] == 4.25
     assert row["verifiable"] is False
     assert row["persona_id"] == ""
+    assert row["trajectory_json"] == ""

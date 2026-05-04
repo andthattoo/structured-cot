@@ -41,6 +41,7 @@ INDEX_STRING_COLUMNS = {
     "language",
     "difficulty",
     "generator_model",
+    "trajectory_json",
 }
 INDEX_FLOAT_COLUMNS = {"elapsed_sec"}
 INDEX_BOOL_COLUMNS = {"verifiable", "needs_workspace", "task_generation_fallback"}
@@ -74,6 +75,7 @@ INDEX_COLUMNS = [
     "difficulty",
     "generator_model",
     "task_generation_fallback",
+    "trajectory_json",
 ]
 
 
@@ -128,6 +130,12 @@ def normalize_index_file(path: Path) -> None:
     with path.open("w") as f:
         for row in rows:
             f.write(json.dumps(normalize_index_row(row), ensure_ascii=False) + "\n")
+
+
+def trajectory_json(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    return json.dumps(read_jsonl(path), ensure_ascii=False, separators=(",", ":"))
 
 
 def relative_to_trace(path_value: str | None, trace_dir: Path) -> Path | None:
@@ -196,7 +204,8 @@ Each upload adds:
 
 - `runs/<run_id>/manifest.jsonl`: original run manifest.
 - `runs/<run_id>/sessions/...`: Pi session JSONL, usually reconstructed from RPC events.
-- `index/<run_id>.jsonl`: viewer-friendly index pointing to usable session files.
+- `index/<run_id>.jsonl`: viewer-friendly index with metadata, session paths,
+  and `trajectory_json` containing the reconstructed session as a JSON string.
 
 The index files intentionally use one stable, non-null schema across all runs
 so the dataset viewer can stream mixed public-repo and persona traces together.
@@ -214,6 +223,7 @@ def build_upload_tree(
     include_errors: bool = False,
     include_rpc: bool = False,
     include_stderr: bool = False,
+    include_index_trajectories: bool = True,
 ) -> dict[str, Any]:
     trace_dir = trace_dir.resolve()
     manifest_path = trace_dir / "manifest.jsonl"
@@ -236,8 +246,12 @@ def build_upload_tree(
             continue
 
         session_path = None
+        trajectory = ""
         if session_rel is not None and (trace_dir / session_rel).exists():
+            session_src = trace_dir / session_rel
             session_path = copy_trace_file(trace_dir, staging_dir, run_id, session_rel)
+            if include_index_trajectories:
+                trajectory = trajectory_json(session_src)
             copied_sessions += 1
 
         rpc_path = None
@@ -287,6 +301,7 @@ def build_upload_tree(
                     "difficulty": metadata.get("difficulty"),
                     "generator_model": metadata.get("generator_model"),
                     "task_generation_fallback": metadata.get("task_generation_fallback"),
+                    "trajectory_json": trajectory,
                 }
             )
         )
@@ -361,6 +376,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-errors", action="store_true")
     parser.add_argument("--include-rpc", action="store_true")
     parser.add_argument("--include-stderr", action="store_true")
+    parser.add_argument(
+        "--no-index-trajectories",
+        action="store_true",
+        help="Do not embed reconstructed session JSON in index rows.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--token-env", default="HF_TOKEN")
     parser.add_argument("--commit-message", default=None)
@@ -385,6 +405,7 @@ def main() -> int:
             include_errors=args.include_errors,
             include_rpc=args.include_rpc,
             include_stderr=args.include_stderr,
+            include_index_trajectories=not args.no_index_trajectories,
         )
         if args.dry_run:
             stats["staging_dir"] = str(staging_dir)
