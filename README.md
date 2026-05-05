@@ -305,6 +305,21 @@ runs can be appended without rewriting existing trace shards. Use
 `--include-rpc --include-stderr` when you want the raw RPC event stream and
 stderr logs in the dataset too.
 
+Build an assistant-step dataset from uploaded trajectory rows:
+
+```bash
+uv run --with datasets --with huggingface-hub python scripts/make_etpi_step_dataset.py \
+  --hf-dataset "$DATASET_REPO" \
+  --out data/train/etpi_steps_v1.jsonl \
+  --stats-out data/train/etpi_steps_v1_stats.json \
+  --canary-out data/train/etpi_steps_v1_canary_32.jsonl
+```
+
+Each output row is one assistant decision point with `state_messages`,
+`target_assistant`, extracted `raw_thinking`, a future `compressed_thinking`
+slot, loss-mask metadata, and simple reward features for stepwise imitation or
+later per-step RL experiments.
+
 ### Start the server
 
 ```bash
