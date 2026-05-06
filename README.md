@@ -320,6 +320,34 @@ Each output row is one assistant decision point with `state_messages`,
 slot, loss-mask metadata, and simple reward features for stepwise imitation or
 later per-step RL experiments.
 
+Train an experimental tail-looped LoRA adapter directly from Pi traces:
+
+```bash
+uv run --with datasets --with torch --with transformers --with accelerate --with peft \
+  python scripts/train_looped_lora_pi.py \
+  --hf-dataset "$DATASET_REPO" \
+  --model Qwen/Qwen3.6-27B \
+  --dtype bfloat16 \
+  --device-map auto \
+  --tail-layers 4 \
+  --max-loops 4 \
+  --min-student-loops 1 \
+  --max-total-tokens 4096 \
+  --batch-size 1 \
+  --grad-accum-steps 8 \
+  --max-steps 200 \
+  --learning-rate 2e-4 \
+  --gradient-checkpointing \
+  --out-dir data/checkpoints/qwen3_6_27b_tail4_loop_lora_smoke
+```
+
+The trainer freezes the base model, adds LoRA only to the selected tail layers,
+strips recorded thinking from context and targets, and trains a max-loop path
+plus a sampled intermediate-loop student with an ILSD-style CE/KL objective.
+This is the first no-extra-token recurrent-depth experiment; it runs with
+`use_cache=False`, so optimized autoregressive serving would need a custom
+loop-aware KV cache later.
+
 Extract hidden-state geometry for a single teacher-forced thinking step:
 
 ```bash
