@@ -352,6 +352,8 @@ uv run --with datasets --with torch --with transformers --with accelerate --with
   --dtype bfloat16 \
   --device-map auto \
   --layers -1 \
+  --batch-size 8 \
+  --max-batch-tokens 32768 \
   --max-total-tokens 16384 \
   --out-dir data/latent_pairs/qwen3_6_27b_layer63_v1
 ```
@@ -360,7 +362,8 @@ This writes `pairs.jsonl` plus `shards/shard_*.npz`. Each shard contains
 `x`, `y`, and `delta` arrays, where `x` is the pre-thinking hidden state and
 `y` is the hidden state after the recorded thinking block closes with
 `</think>`. Start with `--max-pairs 256` for a smoke run, then remove it for
-the full dataset.
+the full dataset. Lower `--batch-size` or `--max-batch-tokens` if a long batch
+gets too close to GPU memory limits.
 
 Plot the extracted trajectory:
 

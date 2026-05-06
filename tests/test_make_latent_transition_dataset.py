@@ -93,6 +93,46 @@ def test_shard_writer_writes_npz(tmp_path: Path) -> None:
     assert second["x"].shape == (1, 1, 3)
 
 
+def test_batch_token_count_and_flush_policy() -> None:
+    candidate_a = make_latent_transition_dataset.PairCandidate(
+        step=step_row(),
+        prefix_ids=[1, 2],
+        thinking_ids=[3],
+        end_ids=[4],
+        input_token_ids=[1, 2, 3, 4],
+        raw="x",
+    )
+    candidate_b = make_latent_transition_dataset.PairCandidate(
+        step=step_row(),
+        prefix_ids=[1],
+        thinking_ids=[2],
+        end_ids=[3],
+        input_token_ids=[1, 2, 3, 4, 5, 6],
+        raw="y",
+    )
+
+    assert candidate_a.positions == [1, 3]
+    assert make_latent_transition_dataset.batch_token_count([candidate_a, candidate_b]) == 12
+    assert make_latent_transition_dataset.should_flush_batch(
+        [candidate_a],
+        candidate_b,
+        batch_size=8,
+        max_batch_tokens=11,
+    )
+    assert make_latent_transition_dataset.should_flush_batch(
+        [candidate_a],
+        candidate_b,
+        batch_size=1,
+        max_batch_tokens=None,
+    )
+    assert not make_latent_transition_dataset.should_flush_batch(
+        [],
+        candidate_b,
+        batch_size=1,
+        max_batch_tokens=1,
+    )
+
+
 def test_pair_metadata_contains_metrics() -> None:
     x = np.array([[1.0, 0.0]], dtype=np.float32)
     y = np.array([[0.0, 1.0]], dtype=np.float32)
