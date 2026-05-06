@@ -325,7 +325,7 @@ Extract hidden-state geometry for a single teacher-forced thinking step:
 ```bash
 uv run --with torch --with transformers --with accelerate --with numpy \
   python scripts/extract_thinking_hidden_trajectory.py \
-  --steps data/train/etpi_steps_v1.jsonl \
+  --hf-dataset "$DATASET_REPO" \
   --step-index 0 \
   --model /path/to/local-or-hf-qwen-27b \
   --layers -1 \
@@ -338,6 +338,9 @@ writes captured hidden states plus per-token PCA and distance CSVs. This is a
 teacher-forced local rendering, not an exact replay of OpenRouter's private
 serving template, so use it for geometry comparisons rather than server-exact
 logit accounting.
+
+If you already materialized a step dataset, replace `--hf-dataset "$DATASET_REPO"`
+with `--steps data/train/etpi_steps_v1.jsonl`.
 
 ### Start the server
 

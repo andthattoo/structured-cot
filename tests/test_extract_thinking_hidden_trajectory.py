@@ -61,6 +61,86 @@ def test_select_step_by_index_and_id(tmp_path: Path) -> None:
     assert by_id["id"] == "first"
 
 
+def test_steps_from_trace_row_matches_step_shape() -> None:
+    trajectory = [
+        {
+            "type": "message",
+            "id": "u1",
+            "message": {"role": "user", "content": [{"type": "text", "text": "Read repo"}]},
+        },
+        {
+            "type": "message",
+            "id": "a1",
+            "message": {
+                "role": "assistant",
+                "stopReason": "toolUse",
+                "content": [
+                    {"type": "thinking", "thinking": "Need context."},
+                    {"type": "toolCall", "id": "call_1", "name": "read", "arguments": {"path": "README.md"}},
+                ],
+            },
+        },
+        {
+            "type": "message",
+            "id": "t1",
+            "message": {"role": "toolResult", "content": [{"type": "text", "text": "# Project"}]},
+        },
+    ]
+    row = {
+        "run_id": "run",
+        "task_id": "task",
+        "source": "test",
+        "thinking_level": "medium",
+        "trajectory_json": json.dumps(trajectory),
+    }
+
+    steps = extract_thinking_hidden_trajectory.steps_from_trace_row(row)
+
+    assert len(steps) == 1
+    assert steps[0]["id"] == "run/task/assistant_0000"
+    assert steps[0]["raw_thinking"] == "Need context."
+    assert steps[0]["target_assistant"]["tool_calls"][0]["name"] == "read"
+
+
+def test_select_step_from_hf_stream(monkeypatch) -> None:
+    trajectory = [
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "Task"}]},
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "stopReason": "stop",
+                "content": [{"type": "thinking", "thinking": "Think."}, {"type": "text", "text": "Done."}],
+            },
+        },
+    ]
+
+    def fake_hf_rows(dataset: str, split: str):
+        assert dataset == "user/repo"
+        assert split == "train"
+        yield {
+            "run_id": "run",
+            "task_id": "task",
+            "source": "test",
+            "trajectory_json": json.dumps(trajectory),
+        }
+
+    monkeypatch.setattr(extract_thinking_hidden_trajectory, "hf_rows", fake_hf_rows)
+
+    step = extract_thinking_hidden_trajectory.select_step_from_hf(
+        "user/repo",
+        split="train",
+        step_index=0,
+        step_id=None,
+    )
+
+    assert step["id"] == "run/task/assistant_0000"
+    assert step["raw_thinking"] == "Think."
+
+
 def test_render_step_prefix_and_target_thinking() -> None:
     step = step_row()
 

@@ -18,6 +18,10 @@ from typing import Any
 import numpy as np
 
 
+TOOL_RESULT_ROLES = {"tool", "toolResult"}
+TEXT_KEYS = ("text", "thinking", "content")
+
+
 def read_jsonl(path: Path):
     with path.open() as f:
         for line_no, line in enumerate(f, 1):
@@ -42,8 +46,205 @@ def select_step(path: Path, *, step_index: int | None, step_id: str | None) -> d
     raise ValueError(f"{path}: no step at index {step_index}")
 
 
+def hf_rows(dataset: str, split: str):
+    from datasets import load_dataset
+
+    yield from load_dataset(dataset, split=split, streaming=True)
+
+
+def content_parts(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return [part for part in content if isinstance(part, dict)]
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return []
+
+
+def extract_tool_calls(parts: list[dict[str, Any]], message: dict[str, Any]) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for part in parts:
+        if part.get("type") != "toolCall":
+            continue
+        calls.append(
+            {
+                "id": "" if part.get("id") is None else str(part.get("id")),
+                "name": "" if part.get("name") is None else str(part.get("name")),
+                "arguments": part.get("arguments") or {},
+            }
+        )
+    raw_calls = message.get("tool_calls")
+    if isinstance(raw_calls, list):
+        for call in raw_calls:
+            if not isinstance(call, dict):
+                continue
+            calls.append(
+                {
+                    "id": "" if call.get("id") is None else str(call.get("id")),
+                    "name": "" if call.get("name") is None else str(call.get("name")),
+                    "arguments": call.get("arguments") or {},
+                }
+            )
+    return calls
+
+
+def text_from_parts(parts: list[dict[str, Any]], *, include_thinking: bool = True) -> str:
+    chunks: list[str] = []
+    for part in parts:
+        if not include_thinking and part.get("type") == "thinking":
+            continue
+        text = part_text(part)
+        if text:
+            chunks.append(text)
+    return "\n".join(chunks)
+
+
+def thinking_from_parts(parts: list[dict[str, Any]]) -> str:
+    return "\n".join(part_text(part) for part in parts if part.get("type") == "thinking" and part_text(part))
+
+
+def trajectory_records(row: dict[str, Any]) -> list[dict[str, Any]]:
+    value = row.get("trajectory_json")
+    if not isinstance(value, str) or not value.strip():
+        return []
+    records = json.loads(value)
+    if not isinstance(records, list):
+        return []
+    return [record for record in records if isinstance(record, dict)]
+
+
+def trajectory_messages(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    for record in records:
+        if record.get("type") != "message" and not ("role" in record and "content" in record):
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            message = record
+        role = message.get("role")
+        if not isinstance(role, str):
+            continue
+        role = "tool" if role in TOOL_RESULT_ROLES else role
+        parts = content_parts(message.get("content"))
+        messages.append(
+            {
+                "id": "" if record.get("id") is None else str(record.get("id")),
+                "role": role,
+                "raw_role": message.get("role"),
+                "content": parts,
+                "text": text_from_parts(parts),
+                "text_without_thinking": text_from_parts(parts, include_thinking=False),
+                "tool_calls": extract_tool_calls(parts, message),
+                "stop_reason": "" if message.get("stopReason") is None else str(message.get("stopReason")),
+                "error": "" if message.get("errorMessage") is None else str(message.get("errorMessage")),
+                "usage": message.get("usage") if isinstance(message.get("usage"), dict) else {},
+            }
+        )
+    return messages
+
+
+def metadata_from_trace_row(row: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "run_id",
+        "task_id",
+        "source",
+        "thinking_level",
+        "base_task_id",
+        "repo_id",
+        "repo_name",
+        "domain",
+        "persona_id",
+        "intent",
+        "language",
+        "needs_workspace",
+        "task_kind",
+        "task_profile",
+    ]
+    return {key: row.get(key) for key in keys if key in row}
+
+
+def steps_from_trace_row(row: dict[str, Any], *, include_empty_assistant: bool = False) -> list[dict[str, Any]]:
+    messages = trajectory_messages(trajectory_records(row))
+    state: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
+    run_id = str(row.get("run_id") or "")
+    task_id = str(row.get("task_id") or "")
+    metadata = metadata_from_trace_row(row)
+    assistant_index = 0
+
+    for message in messages:
+        if message["role"] != "assistant":
+            state.append(message)
+            continue
+        if not include_empty_assistant and not message["content"] and not message["tool_calls"]:
+            state.append(message)
+            continue
+        raw_thinking = thinking_from_parts(message["content"])
+        calls = message["tool_calls"]
+        steps.append(
+            {
+                "id": f"{run_id}/{task_id}/assistant_{assistant_index:04d}",
+                "run_id": run_id,
+                "task_id": task_id,
+                "source": row.get("source") or "",
+                "thinking_level": row.get("thinking_level") or "",
+                "state_messages": list(state),
+                "target_assistant": message,
+                "raw_thinking": raw_thinking,
+                "compressed_thinking": None,
+                "loss_mask": {
+                    "state": False,
+                    "tool_results": False,
+                    "assistant_action": True,
+                    "raw_verbose_thinking": False,
+                    "compressed_thinking": False,
+                },
+                "reward_features": {
+                    "trace_success": str(row.get("status") or "ok") == "ok",
+                    "step_index": len(steps),
+                    "assistant_index": assistant_index,
+                    "state_messages": len(state),
+                    "has_tool_call": bool(calls),
+                    "tool_names": [call.get("name") or "" for call in calls],
+                    "stop_reason": message.get("stop_reason") or "",
+                    "raw_thinking_chars": len(raw_thinking),
+                    "target_text_chars": len(message.get("text_without_thinking") or ""),
+                },
+                "metadata": metadata,
+            }
+        )
+        assistant_index += 1
+        state.append(message)
+
+    return steps
+
+
+def select_step_from_hf(
+    dataset: str,
+    *,
+    split: str,
+    step_index: int | None,
+    step_id: str | None,
+    include_empty_assistant: bool = False,
+) -> dict[str, Any]:
+    if step_index is None and step_id is None:
+        raise ValueError("pass --step-index or --step-id")
+
+    global_index = 0
+    for trace in hf_rows(dataset, split):
+        for step in steps_from_trace_row(trace, include_empty_assistant=include_empty_assistant):
+            if step_index is not None and global_index == step_index:
+                return step
+            if step_id is not None and step.get("id") == step_id:
+                return step
+            global_index += 1
+
+    if step_id is not None:
+        raise ValueError(f"{dataset}/{split}: no step with id {step_id!r}")
+    raise ValueError(f"{dataset}/{split}: no step at global index {step_index}")
+
+
 def part_text(part: dict[str, Any]) -> str:
-    for key in ("text", "thinking", "content"):
+    for key in TEXT_KEYS:
         value = part.get(key)
         if value is not None:
             return str(value)
@@ -268,7 +469,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract hidden states for one ETPI thinking step.")
-    parser.add_argument("--steps", type=Path, required=True, help="Step dataset JSONL.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--steps", type=Path, help="Step dataset JSONL.")
+    source.add_argument("--hf-dataset", help="HF trajectory dataset repo id. Steps are sliced on the fly.")
+    parser.add_argument("--split", default="train")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--step-index", type=int)
     group.add_argument("--step-id")
@@ -280,12 +484,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--max-input-tokens", type=int, default=None)
     parser.add_argument("--allow-empty-thinking", action="store_true")
+    parser.add_argument("--include-empty-assistant", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    step = select_step(args.steps, step_index=args.step_index, step_id=args.step_id)
+    if args.steps is not None:
+        step = select_step(args.steps, step_index=args.step_index, step_id=args.step_id)
+    else:
+        step = select_step_from_hf(
+            args.hf_dataset,
+            split=args.split,
+            step_index=args.step_index,
+            step_id=args.step_id,
+            include_empty_assistant=args.include_empty_assistant,
+        )
     prefix = render_step_prefix(step)
     target = target_thinking_text(step, allow_empty=args.allow_empty_thinking)
 
