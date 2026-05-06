@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 from pathlib import Path
 from typing import Any
 
@@ -304,6 +305,68 @@ def target_thinking_text(step: dict[str, Any], *, allow_empty: bool) -> str:
     return f"{raw}\n</think>" if raw else "</think>"
 
 
+def raw_thinking_text(step: dict[str, Any], *, allow_empty: bool) -> str:
+    raw = step.get("raw_thinking")
+    if not isinstance(raw, str):
+        raw = ""
+    raw = raw.strip()
+    if not raw and not allow_empty:
+        raise ValueError(f"step {step.get('id')} has empty raw_thinking; pass --allow-empty-thinking")
+    return raw
+
+
+def filler_token_ids(tokenizer: Any, count: int, *, filler_text: str) -> list[int]:
+    if count <= 0:
+        return []
+    seed_ids = tokenizer.encode(filler_text, add_special_tokens=False)
+    if not seed_ids:
+        seed_ids = tokenizer.encode(" therefore", add_special_tokens=False)
+    if not seed_ids:
+        raise ValueError("filler text produced no tokens")
+    repeats = (count // len(seed_ids)) + 1
+    return (seed_ids * repeats)[:count]
+
+
+def target_sequence(
+    tokenizer: Any,
+    raw_thinking: str,
+    *,
+    mode: str,
+    seed: int,
+    filler_text: str,
+    override_file: Path | None = None,
+) -> tuple[list[int], list[int], list[int], str]:
+    recorded_ids = tokenizer.encode(raw_thinking, add_special_tokens=False) if raw_thinking else []
+
+    if override_file is not None:
+        thinking_text = override_file.read_text().strip()
+        thinking_ids = tokenizer.encode(thinking_text, add_special_tokens=False) if thinking_text else []
+    elif mode == "recorded":
+        thinking_ids = list(recorded_ids)
+        thinking_text = raw_thinking
+    elif mode == "empty":
+        thinking_ids = []
+        thinking_text = ""
+    elif mode == "filler":
+        thinking_ids = filler_token_ids(tokenizer, len(recorded_ids), filler_text=filler_text)
+        thinking_text = tokenizer.decode(thinking_ids, clean_up_tokenization_spaces=False)
+    elif mode == "shuffle":
+        thinking_ids = list(recorded_ids)
+        rng = random.Random(seed)
+        rng.shuffle(thinking_ids)
+        thinking_text = tokenizer.decode(thinking_ids, clean_up_tokenization_spaces=False)
+    else:
+        raise ValueError(f"unknown thinking mode {mode!r}")
+
+    end_text = "\n</think>" if thinking_ids else "</think>"
+    end_ids = tokenizer.encode(end_text, add_special_tokens=False)
+    if not end_ids:
+        raise ValueError("end marker produced no tokens")
+    target_ids = thinking_ids + end_ids
+    target_text = f"{thinking_text}{end_text}" if thinking_text else end_text
+    return target_ids, thinking_ids, end_ids, target_text
+
+
 def parse_layers(value: str, layer_count: int) -> list[int]:
     if value.strip().lower() in {"last", "-1"}:
         return [layer_count - 1]
@@ -485,6 +548,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-input-tokens", type=int, default=None)
     parser.add_argument("--allow-empty-thinking", action="store_true")
     parser.add_argument("--include-empty-assistant", action="store_true")
+    parser.add_argument(
+        "--thinking-mode",
+        choices=["recorded", "empty", "filler", "shuffle"],
+        default="recorded",
+        help="Teacher-forced thinking control. Filler/shuffle preserve recorded thinking token count.",
+    )
+    parser.add_argument("--thinking-override-file", type=Path, default=None)
+    parser.add_argument("--control-seed", type=int, default=0)
+    parser.add_argument("--filler-text", default=" therefore")
     return parser.parse_args()
 
 
@@ -501,16 +573,20 @@ def main() -> int:
             include_empty_assistant=args.include_empty_assistant,
         )
     prefix = render_step_prefix(step)
-    target = target_thinking_text(step, allow_empty=args.allow_empty_thinking)
+    thinking_raw = raw_thinking_text(step, allow_empty=args.allow_empty_thinking)
 
     model, tokenizer = load_model_and_tokenizer(args)
     layers = parse_layers(args.layers, len(transformer_layers(model)))
 
     prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
-    thinking_raw = str(step.get("raw_thinking") or "").strip()
-    thinking_ids = tokenizer.encode(thinking_raw, add_special_tokens=False) if thinking_raw else []
-    end_ids = tokenizer.encode("\n</think>" if thinking_raw else "</think>", add_special_tokens=False)
-    target_ids = thinking_ids + end_ids
+    target_ids, thinking_ids, end_ids, target = target_sequence(
+        tokenizer,
+        thinking_raw,
+        mode=args.thinking_mode,
+        seed=args.control_seed,
+        filler_text=args.filler_text,
+        override_file=args.thinking_override_file,
+    )
     input_token_ids = prefix_ids + target_ids
 
     if not prefix_ids:
@@ -574,7 +650,11 @@ def main() -> int:
         "thinking_level": step.get("thinking_level"),
         "model": args.model,
         "layers": layers,
+        "thinking_mode": args.thinking_mode,
+        "thinking_override_file": str(args.thinking_override_file) if args.thinking_override_file else None,
+        "control_seed": args.control_seed,
         "prefix_tokens": len(prefix_ids),
+        "recorded_thinking_tokens": len(tokenizer.encode(thinking_raw, add_special_tokens=False)) if thinking_raw else 0,
         "thinking_tokens": len(thinking_ids),
         "end_tokens": len(end_ids),
         "total_tokens": len(input_token_ids),

@@ -154,6 +154,68 @@ def test_render_step_prefix_and_target_thinking() -> None:
     assert target == "Now answer from the README.\n</think>"
 
 
+class TinyTokenizer:
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        del add_special_tokens
+        return [ord(char) for char in text]
+
+    def decode(self, ids: list[int], clean_up_tokenization_spaces: bool = False) -> str:
+        del clean_up_tokenization_spaces
+        return "".join(chr(token_id) for token_id in ids)
+
+
+def test_target_sequence_modes_preserve_or_change_thinking_tokens(tmp_path: Path) -> None:
+    tokenizer = TinyTokenizer()
+    raw = "abc"
+
+    recorded = extract_thinking_hidden_trajectory.target_sequence(
+        tokenizer,
+        raw,
+        mode="recorded",
+        seed=0,
+        filler_text="x",
+    )
+    empty = extract_thinking_hidden_trajectory.target_sequence(
+        tokenizer,
+        raw,
+        mode="empty",
+        seed=0,
+        filler_text="x",
+    )
+    filler = extract_thinking_hidden_trajectory.target_sequence(
+        tokenizer,
+        raw,
+        mode="filler",
+        seed=0,
+        filler_text="x",
+    )
+    shuffled = extract_thinking_hidden_trajectory.target_sequence(
+        tokenizer,
+        raw,
+        mode="shuffle",
+        seed=1,
+        filler_text="x",
+    )
+    override_path = tmp_path / "override.txt"
+    override_path.write_text("zz")
+    override = extract_thinking_hidden_trajectory.target_sequence(
+        tokenizer,
+        raw,
+        mode="recorded",
+        seed=0,
+        filler_text="x",
+        override_file=override_path,
+    )
+
+    assert recorded[1] == [ord("a"), ord("b"), ord("c")]
+    assert empty[1] == []
+    assert filler[1] == [ord("x"), ord("x"), ord("x")]
+    assert sorted(shuffled[1]) == sorted(recorded[1])
+    assert override[1] == [ord("z"), ord("z")]
+    assert recorded[3].endswith("\n</think>")
+    assert empty[3] == "</think>"
+
+
 def test_pca_and_distances_are_well_formed() -> None:
     hidden = np.array(
         [
