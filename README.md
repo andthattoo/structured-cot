@@ -342,6 +342,18 @@ logit accounting.
 If you already materialized a step dataset, replace `--hf-dataset "$DATASET_REPO"`
 with `--steps data/train/etpi_steps_v1.jsonl`.
 
+Plot the extracted trajectory:
+
+```bash
+uv run --with numpy --with scikit-learn --with matplotlib python scripts/plot_hidden_trajectory.py \
+  --latent-dir data/latent/step_000000 \
+  --layer 63 \
+  --method tsne
+```
+
+This writes `tsne_layer_63.csv` and `tsne_layer_63.png` next to the hidden
+state dump. Use `--method pca` for a deterministic linear projection.
+
 ### Start the server
 
 ```bash
