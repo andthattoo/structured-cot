@@ -351,6 +351,41 @@ loop-aware KV cache later. Use `--student-loop-mode all` to train every
 intermediate loop, for example `L=1,2,3`, against `L=4` on each batch. If GPU
 memory is tight, lower `--max-total-tokens` first.
 
+Prepare public-repo Pi tasks for slime agent RL:
+
+```bash
+uv run python scripts/make_slime_pi_prompts.py \
+  --tasks data/pi_tasks/etpi_public_repo_tasks_expanded_v1.jsonl \
+  --out data/slime/etpi_public_repo_tasks_expanded_v1_prompts.jsonl
+```
+
+The output includes both a plain `prompt` string and an OpenAI-style `messages`
+field. For slime, use the `messages` field with chat templating when the target
+model supports it, and carry `metadata` into the rollout hooks:
+
+```bash
+CUSTOM_ARGS=(
+  --prompt-data /root/structured-cot/data/slime/etpi_public_repo_tasks_expanded_v1_prompts.jsonl
+  --input-key messages
+  --metadata-key metadata
+  --apply-chat-template
+  --custom-generate-function-path slime_plugins.etpi_pi_harness.generate
+  --custom-rm-path slime_plugins.etpi_pi_harness.reward_func
+)
+
+export PYTHONPATH=/root/structured-cot:$PYTHONPATH
+export ETPI_SLIME_ENABLE_SHELL=1
+```
+
+`slime_plugins.etpi_pi_harness` implements a small terminal protocol for rollout
+debugging: model tokens use `<bash>COMMAND</bash>` to run a command and
+`<final>SUMMARY</final>` to stop. Shell observations are appended with
+`loss_mask=0`, while model-generated action/final tokens remain trainable. If a
+task row includes `verify_commands`, the custom reward hook executes those
+commands in the task workspace and returns the pass rate; otherwise it gives a
+small heuristic reward for a non-empty final answer. Run this only in disposable
+rollout workspaces.
+
 Extract hidden-state geometry for a single teacher-forced thinking step:
 
 ```bash
