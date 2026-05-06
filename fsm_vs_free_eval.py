@@ -636,9 +636,11 @@ def make_client(args):
         print(
             f"ERROR: cannot reach the server at {args.base_url}\n"
             f"  ({type(e).__name__}: {e})\n\n"
-            "Start the local llama-cpp-python server first:\n"
-            "  nohup ./run_server.sh > server.log 2>&1 &\n"
-            "  tail -f server.log   # wait for 'Uvicorn running on ...'\n\n"
+            "Start a local OpenAI-compatible server first:\n"
+            "  BACKGROUND=1 SERVER_MODE=llama.cpp ./run_server.sh\n"
+            "  tail -f server.log   # wait for /v1/models to respond\n\n"
+            "For the experimental tools+grammar patch, use:\n"
+            "  BACKGROUND=1 SERVER_MODE=pre-trigger-grammar ./run_server.sh\n\n"
             "Or point --base-url at whatever OpenAI-compatible endpoint you want.",
             file=sys.stderr,
         )

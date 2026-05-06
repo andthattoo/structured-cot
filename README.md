@@ -75,16 +75,22 @@ For long generations, native `llama-server` is faster than `llama-cpp-python`, a
 sudo apt-get update
 sudo apt-get install -y git cmake build-essential libcurl4-openssl-dev
 
-git clone https://github.com/ggml-org/llama.cpp ~/llama.cpp
-cmake -S ~/llama.cpp -B ~/llama.cpp/build \
-    -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build ~/llama.cpp/build --config Release -j
-
-export PATH="$HOME/llama.cpp/build/bin:$PATH"
-llama-server --help | head
+./scripts/build_llama_cpp.sh native
+.local/bin/llama-server --help | head
 ```
 
-The repo includes [`run_llama_server.sh`](run_llama_server.sh), which defaults to:
+The build script clones llama.cpp into `.deps/`, builds `llama-server`, and
+installs the binary under `.local/bin/`. Set
+`LLAMA_CPP_REF=<branch|tag|sha>` to build a specific upstream revision.
+
+The repo includes [`run_llama_server.sh`](run_llama_server.sh), or the unified
+[`run_server.sh`](run_server.sh) mode:
+
+```bash
+SERVER_MODE=llama.cpp BACKGROUND=1 ./run_server.sh
+```
+
+This defaults to:
 
 ```bash
 llama-server -hf ggml-org/Qwen3.6-27B-GGUF --spec-default \
@@ -92,7 +98,30 @@ llama-server -hf ggml-org/Qwen3.6-27B-GGUF --spec-default \
     --flash-attn on --reasoning-format none
 ```
 
-The older [`run_server.sh`](run_server.sh) still starts `llama-cpp-python` and is kept for reproducing the original run.
+By default, [`run_server.sh`](run_server.sh) still starts `llama-cpp-python`
+and is kept for reproducing the original run.
+
+### Experimental tools + grammar llama.cpp build
+
+Upstream `llama-server` currently rejects requests that combine OpenAI-style
+`tools` with a custom `grammar`, because tool calling uses its own generated
+grammar. This repo vendors the experimental discussion patch at
+[`third_party/patches/llama.cpp/pre-trigger-grammar-78433f6.patch`](third_party/patches/llama.cpp/pre-trigger-grammar-78433f6.patch).
+It adds a pre-trigger grammar slot that constrains the reasoning phase and then
+yields to llama.cpp's tool grammar.
+
+Build and run the patched server:
+
+```bash
+./scripts/build_llama_cpp.sh pre-trigger-grammar
+SERVER_MODE=pre-trigger-grammar BACKGROUND=1 ./run_server.sh
+```
+
+Patched mode defaults to `--reasoning-format deepseek`, so reasoning arrives in
+the OpenAI-compatible `reasoning_content` field rather than visible
+`<think>...</think>` text. The eval harness preserves that field for token
+accounting, but treat this mode as experimental: overly tight reasoning
+grammars can improve structure while hurting answer quality.
 
 ### Model download
 
@@ -109,7 +138,7 @@ The server can run in the foreground in one pane, or in the background from a si
 ### Start the server
 
 ```bash
-BACKGROUND=1 ./run_llama_server.sh
+BACKGROUND=1 SERVER_MODE=llama.cpp ./run_server.sh
 tail -f server.log
 curl http://127.0.0.1:8000/v1/models
 ```
@@ -117,10 +146,11 @@ curl http://127.0.0.1:8000/v1/models
 By default this downloads/serves `ggml-org/Qwen3.6-27B-GGUF` through native `llama-server` with `--spec-default` and `--reasoning-format none`, so `<think>...</think>` remains visible for token accounting. Override with env vars:
 
 ```bash
-HF_REPO=ggml-org/Qwen3.6-27B-GGUF N_CTX=32768 BACKGROUND=1 ./run_llama_server.sh
-MODEL_PATH=/path/to/model.gguf BACKGROUND=1 ./run_llama_server.sh
-KV_TYPE=q8_0 BACKGROUND=1 ./run_llama_server.sh
-REASONING_FORMAT=deepseek-legacy BACKGROUND=1 ./run_llama_server.sh
+HF_REPO=ggml-org/Qwen3.6-27B-GGUF N_CTX=32768 BACKGROUND=1 SERVER_MODE=llama.cpp ./run_server.sh
+MODEL_PATH=/path/to/model.gguf BACKGROUND=1 SERVER_MODE=llama.cpp ./run_server.sh
+KV_TYPE=q8_0 BACKGROUND=1 SERVER_MODE=llama.cpp ./run_server.sh
+REASONING_FORMAT=deepseek-legacy BACKGROUND=1 SERVER_MODE=llama.cpp ./run_server.sh
+BACKGROUND=1 SERVER_MODE=pre-trigger-grammar ./run_server.sh
 ```
 
 Background mode writes `server.log` and `server.pid`. Stop it with:
@@ -129,7 +159,9 @@ Background mode writes `server.log` and `server.pid`. Stop it with:
 kill "$(cat server.pid)"
 ```
 
-If you prefer the original Python server, use `./run_server.sh`. It auto-discovers the GGUF from `~/.cache/huggingface/hub/` or `~/models/`, uses 8-bit KV cache (`q8_0`), flash attention, and `n_ctx=65536`.
+If you prefer the original Python server, use `./run_server.sh` without
+`SERVER_MODE`. It auto-discovers the GGUF from `~/.cache/huggingface/hub/` or
+`~/models/`, uses 8-bit KV cache (`q8_0`), flash attention, and `n_ctx=65536`.
 
 ### Run the comparison
 

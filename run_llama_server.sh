@@ -7,7 +7,8 @@
 #
 # Customize env vars as needed:
 #
-#   LLAMA_SERVER_BIN — path to llama-server (default: first on PATH)
+#   LLAMA_SERVER_BIN — path to llama-server (default: repo-local binary, then PATH)
+#   LLAMA_CPP_MODE   — native or pre-trigger-grammar (default: native)
 #   HF_REPO          — Hugging Face GGUF repo (default: ggml-org/Qwen3.6-27B-GGUF)
 #   HF_FILE          — optional specific GGUF filename in HF_REPO
 #   MODEL_PATH       — optional local .gguf path; overrides HF_REPO/HF_FILE
@@ -29,7 +30,37 @@
 
 set -euo pipefail
 
-LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-llama-server}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LLAMA_CPP_MODE="${LLAMA_CPP_MODE:-native}"
+case "${LLAMA_CPP_MODE}" in
+    native|pre-trigger-grammar|patched)
+        ;;
+    *)
+        echo "ERROR: LLAMA_CPP_MODE must be native or pre-trigger-grammar, got '${LLAMA_CPP_MODE}'"
+        exit 1
+        ;;
+esac
+if [ "${LLAMA_CPP_MODE}" = "patched" ]; then
+    LLAMA_CPP_MODE="pre-trigger-grammar"
+fi
+
+if [ -z "${LLAMA_SERVER_BIN:-}" ]; then
+    if [ "${LLAMA_CPP_MODE}" = "pre-trigger-grammar" ] && [ -x "${ROOT_DIR}/.local/bin/llama-server-pre-trigger" ]; then
+        LLAMA_SERVER_BIN="${ROOT_DIR}/.local/bin/llama-server-pre-trigger"
+    elif [ "${LLAMA_CPP_MODE}" = "pre-trigger-grammar" ]; then
+        echo "ERROR: patched llama-server not found at ${ROOT_DIR}/.local/bin/llama-server-pre-trigger"
+        echo "Build it first:"
+        echo "  ./scripts/build_llama_cpp.sh pre-trigger-grammar"
+        echo
+        echo "Or set LLAMA_SERVER_BIN=/path/to/patched/llama-server."
+        exit 1
+    elif [ -x "${ROOT_DIR}/.local/bin/llama-server" ]; then
+        LLAMA_SERVER_BIN="${ROOT_DIR}/.local/bin/llama-server"
+    else
+        LLAMA_SERVER_BIN="llama-server"
+    fi
+fi
+
 HF_REPO="${HF_REPO:-ggml-org/Qwen3.6-27B-GGUF}"
 N_CTX="${N_CTX:-32768}"
 PORT="${PORT:-8000}"
@@ -37,7 +68,11 @@ HOST="${HOST:-127.0.0.1}"
 N_GPU_LAYERS="${N_GPU_LAYERS:-999}"
 FLASH_ATTN="${FLASH_ATTN:-on}"
 SPEC_DEFAULT="${SPEC_DEFAULT:-1}"
-REASONING_FORMAT="${REASONING_FORMAT:-none}"
+if [ "${LLAMA_CPP_MODE}" = "pre-trigger-grammar" ]; then
+    REASONING_FORMAT="${REASONING_FORMAT:-deepseek}"
+else
+    REASONING_FORMAT="${REASONING_FORMAT:-none}"
+fi
 BACKGROUND="${BACKGROUND:-0}"
 LOG_FILE="${LOG_FILE:-server.log}"
 PID_FILE="${PID_FILE:-server.pid}"
@@ -52,6 +87,10 @@ if ! command -v "${LLAMA_SERVER_BIN}" >/dev/null 2>&1; then
     echo "  cmake -S ~/llama.cpp -B ~/llama.cpp/build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release"
     echo "  cmake --build ~/llama.cpp/build --config Release -j"
     echo "  export PATH=\"\$HOME/llama.cpp/build/bin:\$PATH\""
+    echo
+    echo "Or build the repo-local binary:"
+    echo "  ./scripts/build_llama_cpp.sh native"
+    echo "  ./scripts/build_llama_cpp.sh pre-trigger-grammar"
     echo
     echo "Then rerun this script."
     exit 1
@@ -106,6 +145,8 @@ if [ -n "${KV_TYPE:-}" ]; then
 fi
 
 echo "Starting native llama-server"
+echo "  mode       = ${LLAMA_CPP_MODE}"
+echo "  binary     = ${LLAMA_SERVER_BIN}"
 if [ -n "${MODEL_PATH:-}" ]; then
     echo "  model      = ${MODEL_PATH}"
 else

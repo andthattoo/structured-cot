@@ -8,11 +8,29 @@
 #   HOST        — bind address (default: 127.0.0.1)
 #   KV_TYPE     — KV cache quant, e.g. q8_0 or q4_0 (default: q8_0)
 #   N_GPU_LAYERS — -1 offloads everything to GPU (default: -1)
+#   SERVER_MODE — python, llama.cpp, or pre-trigger-grammar (default: python)
 #
 # Run in a tmux pane and leave it up; point longcot_mini_eval.py at
 # http://$HOST:$PORT/v1 in another pane.
 
 set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER_MODE="${SERVER_MODE:-python}"
+case "${SERVER_MODE}" in
+    python|llama-cpp-python)
+        ;;
+    llama.cpp|llama_cpp|llama-cpp|native)
+        exec "${ROOT_DIR}/run_llama_server.sh" "$@"
+        ;;
+    pre-trigger-grammar|patched)
+        LLAMA_CPP_MODE=pre-trigger-grammar exec "${ROOT_DIR}/run_llama_server.sh" "$@"
+        ;;
+    *)
+        echo "ERROR: SERVER_MODE must be python, llama.cpp, native, or pre-trigger-grammar, got '${SERVER_MODE}'"
+        exit 1
+        ;;
+esac
 
 N_CTX="${N_CTX:-65536}"
 PORT="${PORT:-8000}"

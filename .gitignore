@@ -14,6 +14,8 @@ animations/
 # Model cache
 *.gguf
 models/
+.deps/
+.local/
 
 # Server logs
 server.log
