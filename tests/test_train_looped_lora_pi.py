@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,3 +84,22 @@ def test_lambda_schedule_decays_to_final_value() -> None:
     assert train_looped_lora_pi.lambda_for_step(9, total_steps=10, final_lambda=0.2) == 0.2
     middle = train_looped_lora_pi.lambda_for_step(5, total_steps=10, final_lambda=0.2)
     assert 0.2 < middle < 1.0
+
+
+def test_student_loop_values_support_sampled_and_all() -> None:
+    class FakeRng:
+        def randint(self, low: int, high: int) -> int:
+            assert (low, high) == (1, 3)
+            return 2
+
+    sampled = train_looped_lora_pi.student_loop_values(
+        SimpleNamespace(student_loop_mode="sampled", min_student_loops=1, max_loops=4),
+        FakeRng(),
+    )
+    all_loops = train_looped_lora_pi.student_loop_values(
+        SimpleNamespace(student_loop_mode="all", min_student_loops=1, max_loops=4),
+        FakeRng(),
+    )
+
+    assert sampled == [2]
+    assert all_loops == [1, 2, 3]

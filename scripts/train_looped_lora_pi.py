@@ -238,6 +238,14 @@ def batch_iterator(examples: list[dict[str, Any]], *, batch_size: int, rng: rand
             yield [examples[index] for index in order[start : start + batch_size]]
 
 
+def student_loop_values(args: argparse.Namespace, rng: random.Random) -> list[int]:
+    if args.student_loop_mode == "sampled":
+        return [rng.randint(args.min_student_loops, args.max_loops - 1)]
+    if args.student_loop_mode == "all":
+        return list(range(args.min_student_loops, args.max_loops))
+    raise ValueError(f"unknown student loop mode {args.student_loop_mode!r}")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a tail-looped LoRA adapter on ETPI Pi traces.")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -261,8 +269,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tail-layers", type=int, default=4)
     parser.add_argument("--max-loops", type=int, default=4)
     parser.add_argument("--min-student-loops", type=int, default=1)
+    parser.add_argument("--student-loop-mode", choices=["sampled", "all"], default="sampled")
     parser.add_argument("--distill-temperature", type=float, default=1.0)
     parser.add_argument("--final-lambda", type=float, default=0.0)
+    parser.add_argument("--teacher-loss-weight", type=float, default=1.0)
     parser.add_argument("--student-loss-weight", type=float, default=1.0)
     parser.add_argument("--distill-loss-weight", type=float, default=1.0)
     parser.add_argument("--lora-r", type=int, default=16)
@@ -347,42 +357,53 @@ def main(argv: list[str] | None = None) -> int:
 
     for step in range(args.max_steps):
         lambda_value = lambda_for_step(step, total_steps=args.max_steps, final_lambda=args.final_lambda)
-        student_loops = rng.randint(args.min_student_loops, args.max_loops - 1)
+        student_loops = student_loop_values(args, rng)
         accum_loss = 0.0
         accum_teacher = 0.0
         accum_student = 0.0
         accum_kl = 0.0
+        accum_student_forwards = 0
 
         for _micro in range(args.grad_accum_steps):
             raw_batch = next(iterator)
             batch = collate_batch(raw_batch, pad_token_id=pad_token_id)
             batch = {key: value.to(device) for key, value in batch.items()}
+            distill_coeff = args.distill_loss_weight * (1.0 - lambda_value)
 
             with loop_tail_layers(model, tail_layers=args.tail_layers, loops=args.max_loops):
                 teacher_outputs = model(**batch, use_cache=False)
-            with loop_tail_layers(model, tail_layers=args.tail_layers, loops=student_loops):
-                student_outputs = model(**batch, use_cache=False)
-
             teacher_loss = teacher_outputs.loss
-            student_ce = student_outputs.loss
-            distill_coeff = args.distill_loss_weight * (1.0 - lambda_value)
-            if distill_coeff:
-                kl = masked_kl_loss(
-                    student_outputs.logits,
-                    teacher_outputs.logits,
-                    batch["labels"],
-                    temperature=args.distill_temperature,
-                )
-            else:
-                kl = student_ce.new_zeros(())
-            student_loss = lambda_value * student_ce + distill_coeff * kl
-            loss = teacher_loss + args.student_loss_weight * student_loss
-
-            (loss / args.grad_accum_steps).backward()
-            accum_loss += float(loss.detach().cpu())
+            teacher_logits = teacher_outputs.logits.detach() if distill_coeff else None
+            teacher_scaled_loss = args.teacher_loss_weight * teacher_loss
+            (teacher_scaled_loss / args.grad_accum_steps).backward()
+            accum_loss += float(teacher_scaled_loss.detach().cpu())
             accum_teacher += float(teacher_loss.detach().cpu())
-            accum_student += float(student_ce.detach().cpu())
-            accum_kl += float(kl.detach().cpu())
+            del teacher_outputs
+
+            student_weight = args.student_loss_weight / len(student_loops)
+            for loop_count in student_loops:
+                with loop_tail_layers(model, tail_layers=args.tail_layers, loops=loop_count):
+                    student_outputs = model(**batch, use_cache=False)
+
+                student_ce = student_outputs.loss
+                if teacher_logits is not None:
+                    kl = masked_kl_loss(
+                        student_outputs.logits,
+                        teacher_logits,
+                        batch["labels"],
+                        temperature=args.distill_temperature,
+                    )
+                else:
+                    kl = student_ce.new_zeros(())
+                student_loss = lambda_value * student_ce + distill_coeff * kl
+                scaled_student_loss = student_weight * student_loss
+                (scaled_student_loss / args.grad_accum_steps).backward()
+                accum_loss += float(scaled_student_loss.detach().cpu())
+                accum_student += float(student_ce.detach().cpu())
+                accum_kl += float(kl.detach().cpu())
+                accum_student_forwards += 1
+                del student_outputs
+            del teacher_logits
 
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
@@ -392,10 +413,11 @@ def main(argv: list[str] | None = None) -> int:
                 "step": step + 1,
                 "loss": accum_loss / args.grad_accum_steps,
                 "teacher_ce": accum_teacher / args.grad_accum_steps,
-                "student_ce": accum_student / args.grad_accum_steps,
-                "kl": accum_kl / args.grad_accum_steps,
+                "student_ce": accum_student / max(1, accum_student_forwards),
+                "kl": accum_kl / max(1, accum_student_forwards),
                 "lambda": lambda_value,
                 "student_loops": student_loops,
+                "student_loop_mode": args.student_loop_mode,
                 "max_loops": args.max_loops,
             }
             print(json.dumps(payload, sort_keys=True), flush=True)
@@ -414,6 +436,10 @@ def main(argv: list[str] | None = None) -> int:
         "tail_layers": args.tail_layers,
         "max_loops": args.max_loops,
         "min_student_loops": args.min_student_loops,
+        "student_loop_mode": args.student_loop_mode,
+        "teacher_loss_weight": args.teacher_loss_weight,
+        "student_loss_weight": args.student_loss_weight,
+        "distill_loss_weight": args.distill_loss_weight,
         "lora_r": args.lora_r,
         "lora_alpha": args.lora_alpha,
         "lora_targets": target_modules,

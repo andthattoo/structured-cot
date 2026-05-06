@@ -332,6 +332,7 @@ uv run --with datasets --with torch --with transformers --with accelerate --with
   --tail-layers 4 \
   --max-loops 4 \
   --min-student-loops 1 \
+  --student-loop-mode sampled \
   --max-total-tokens 4096 \
   --batch-size 1 \
   --grad-accum-steps 8 \
@@ -346,7 +347,9 @@ strips recorded thinking from context and targets, and trains a max-loop path
 plus a sampled intermediate-loop student with an ILSD-style CE/KL objective.
 This is the first no-extra-token recurrent-depth experiment; it runs with
 `use_cache=False`, so optimized autoregressive serving would need a custom
-loop-aware KV cache later.
+loop-aware KV cache later. Use `--student-loop-mode all` to train every
+intermediate loop, for example `L=1,2,3`, against `L=4` on each batch. If GPU
+memory is tight, lower `--max-total-tokens` first.
 
 Extract hidden-state geometry for a single teacher-forced thinking step:
 
