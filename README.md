@@ -342,6 +342,26 @@ logit accounting.
 If you already materialized a step dataset, replace `--hf-dataset "$DATASET_REPO"`
 with `--steps data/train/etpi_steps_v1.jsonl`.
 
+Build a compact latent transition dataset from many steps:
+
+```bash
+uv run --with datasets --with torch --with transformers --with accelerate --with numpy \
+  python scripts/make_latent_transition_dataset.py \
+  --hf-dataset "$DATASET_REPO" \
+  --model Qwen/Qwen3.6-27B \
+  --dtype bfloat16 \
+  --device-map auto \
+  --layers -1 \
+  --max-total-tokens 16384 \
+  --out-dir data/latent_pairs/qwen3_6_27b_layer63_v1
+```
+
+This writes `pairs.jsonl` plus `shards/shard_*.npz`. Each shard contains
+`x`, `y`, and `delta` arrays, where `x` is the pre-thinking hidden state and
+`y` is the hidden state after the recorded thinking block closes with
+`</think>`. Start with `--max-pairs 256` for a smoke run, then remove it for
+the full dataset.
+
 Plot the extracted trajectory:
 
 ```bash
