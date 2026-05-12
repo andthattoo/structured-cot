@@ -1,0 +1,27 @@
+# Per-turn structured thinking + action for the Pi coding harness.
+#
+# Enforces a compact 3-slot IR inside <think>, then exactly one action:
+# either a single bash command or a final answer.
+#
+#   <think>
+#   STATE: <one short line: current workspace state>
+#   ACTION: <one short line: next move and why>
+#   EXPECT: <one short line: what success will look like>
+#   </think>
+#   <bash>...</bash>   OR   <final>...</final>
+#
+# The EXPECT slot is the underrated one: it lets a reward model later
+# score whether the observation matched what the model predicted, giving
+# per-turn calibration signal almost for free.
+#
+# Each rule MUST be on a single line for llama.cpp's GBNF parser.
+# body excludes "</" so the closing tag is unambiguous (single `<` is fine
+# for shell redirects; `</` would collide with the closing tag).
+
+root   ::= think action
+think  ::= "<think>\n" "STATE: " line "ACTION: " line "EXPECT: " line "</think>\n"
+action ::= bash | final
+bash   ::= "<bash>" body "</bash>"
+final  ::= "<final>" body "</final>"
+line   ::= [^\n]+ "\n"
+body   ::= ([\x09\x0A\x0D\x20-\x3B\x3D-\x7E] | "<" [\x09\x0A\x0D\x20-\x2E\x30-\x7E])+
