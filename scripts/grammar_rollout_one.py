@@ -31,6 +31,7 @@ from openai import OpenAI
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INDEX_PATH = REPO_ROOT / "data" / "pi_tasks" / "tracejepa_pi_2500_v1_qwen27.index.jsonl"
 GRAMMAR_PATH = REPO_ROOT / "grammars" / "fsm_grammar_pi_turn.gbnf"
+HF_DATASET = "andthattoo/etpi-pi-traces"
 
 BACKEND_DEFAULTS = {
     "llamacpp": {"base_url": "http://127.0.0.1:8000/v1", "grammar_field": "grammar"},
@@ -54,12 +55,33 @@ BASH_RE = re.compile(r"<bash>(.*?)</bash>", re.DOTALL)
 FINAL_RE = re.compile(r"<final>(.*?)</final>", re.DOTALL)
 
 
-def load_task(idx: int) -> dict:
+def load_task_local(idx: int) -> dict:
     with INDEX_PATH.open() as f:
         for i, line in enumerate(f):
             if i == idx:
                 return json.loads(line)
     raise IndexError(f"task index {idx} not found in {INDEX_PATH}")
+
+
+def load_task_hf(idx: int, run_id: str | None) -> dict:
+    from datasets import load_dataset
+    ds = load_dataset(HF_DATASET, split="train", streaming=True)
+    if run_id:
+        ds = ds.filter(lambda r: r.get("run_id") == run_id)
+    for i, row in enumerate(ds):
+        if i == idx:
+            return dict(row)
+    raise IndexError(
+        f"task index {idx} not found in {HF_DATASET} (run_id={run_id})"
+    )
+
+
+def load_task(source: str, idx: int, run_id: str | None) -> dict:
+    if source == "local":
+        return load_task_local(idx)
+    if source == "hf":
+        return load_task_hf(idx, run_id)
+    raise ValueError(f"unknown source: {source}")
 
 
 def stub_observation(command: str) -> str:
@@ -147,6 +169,11 @@ def main() -> None:
     p.add_argument("--backend", choices=list(BACKEND_DEFAULTS), default="llamacpp")
     p.add_argument("--base-url", default=None,
                    help="override; defaults follow --backend")
+    p.add_argument("--source", choices=["local", "hf"], default="hf",
+                   help="task source: local jsonl or HF dataset")
+    p.add_argument("--run-id", default=None,
+                   help="HF only: filter to a specific run_id "
+                        "(e.g. tracejepa_pi_2500_v1_qwen27)")
     p.add_argument("--out", default=None)
     args = p.parse_args()
 
@@ -154,7 +181,7 @@ def main() -> None:
     base_url = args.base_url or defaults["base_url"]
     grammar_field = defaults["grammar_field"]
 
-    task = load_task(args.task_idx)
+    task = load_task(args.source, args.task_idx, args.run_id)
     grammar = GRAMMAR_PATH.read_text()
 
     result = run_rollout(
