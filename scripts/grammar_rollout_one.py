@@ -164,7 +164,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task-idx", type=int, default=0)
     p.add_argument("--max-turns", type=int, default=6)
-    p.add_argument("--max-tokens", type=int, default=2048)
+    p.add_argument("--max-tokens", type=int, default=8192)
     p.add_argument("--model", default="Qwen/Qwen3.6-27B")
     p.add_argument("--backend", choices=list(BACKEND_DEFAULTS), default="llamacpp")
     p.add_argument("--base-url", default=None,
