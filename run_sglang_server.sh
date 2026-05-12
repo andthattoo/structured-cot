@@ -50,9 +50,11 @@ echo "  cache = $HF_CACHE -> /root/.cache/huggingface"
 echo "  ctx   = $MAX_LEN"
 echo "  image = $IMAGE"
 echo
-echo "Parsers: --reasoning-parser qwen3-thinking  --tool-call-parser qwen3_coder"
-echo "(needed so Pi can read <think> blocks as reasoning_content and"
-echo " Qwen's XML tool calls as OpenAI tool_calls)"
+echo "Parsers: --tool-call-parser qwen3_coder"
+echo "(reasoning parser intentionally OFF: with it on, SGLang carves"
+echo " the <think> region out of xgrammar enforcement and our IR grammar"
+echo " ends up applied to content instead of reasoning. Off = grammar"
+echo " constrains the whole generation including the thinking block.)"
 echo
 
 # --ipc=host and --shm-size are required for multi-GPU NCCL; without them
@@ -72,6 +74,5 @@ exec docker run --gpus all --rm -it \
     --host 0.0.0.0 --port 30000 \
     --grammar-backend xgrammar \
     --context-length "$MAX_LEN" \
-    --reasoning-parser qwen3-thinking \
     --tool-call-parser qwen3_coder \
     $EXTRA_ARGS
