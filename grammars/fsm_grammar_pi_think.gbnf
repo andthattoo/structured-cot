@@ -1,0 +1,20 @@
+# Grammar for Qwen3-style models served behind Pi (or any client using a
+# qwen-chat-template provider that sets `chat_template_kwargs.enable_thinking`).
+#
+# The chat template injects "<think>\n" before the assistant's first token,
+# so the model's actual emitted output starts with the slot content.
+# This grammar:
+#
+#   1. Constrains the reasoning scratchpad to a 3-slot IR
+#      (STATE / ACTION / EXPECT)
+#   2. Requires "</think>\n" to terminate the reasoning block
+#   3. Leaves everything after </think> permissive so the model is free
+#      to emit native tool-call XML (which SGLang's qwen3_coder parser
+#      then converts into OpenAI tool_calls for the client)
+#
+# Same principle as the blog grammars: constrain the scratchpad, free the
+# answer. Each rule MUST be on a single line for llama.cpp's GBNF parser.
+
+root ::= "STATE: " line "ACTION: " line "EXPECT: " line "</think>\n" rest
+line ::= [^\n]+ "\n"
+rest ::= [\x09\x0A\x0D\x20-\x7E]*
