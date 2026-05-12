@@ -18,12 +18,19 @@ DEFAULT_SOURCE_DATASET = "driaforall/tracejepa-pi-2500-v1"
 DEFAULT_TARGET_REPO = "andthattoo/etpi-pi-traces"
 DEFAULT_RUN_ID = "tracejepa_pi_2500_v1_qwen27"
 DEFAULT_MODEL_PATTERN = r"qwen[^,\n\r\t\"']*(?:27\s*b|27b)"
+DEFAULT_CONFIG = "transitions"
 
 
-def iter_hf_rows(dataset: str, *, split: str, streaming: bool) -> Iterable[dict[str, Any]]:
+def iter_hf_rows(
+    dataset: str,
+    *,
+    config: str | None,
+    split: str,
+    streaming: bool,
+) -> Iterable[dict[str, Any]]:
     from datasets import load_dataset
 
-    ds = load_dataset(dataset, split=split, streaming=streaming)
+    ds = load_dataset(dataset, config, split=split, streaming=streaming)
     for row in ds:
         if isinstance(row, dict):
             yield row
@@ -81,6 +88,9 @@ def trajectory_value(row: dict[str, Any]) -> str:
         "trajectory",
         "events",
         "messages",
+        "goal_events",
+        "next_prefix_events",
+        "prefix_events",
     )
     if value is None:
         return ""
@@ -93,7 +103,96 @@ def trajectory_value(row: dict[str, Any]) -> str:
         except json.JSONDecodeError:
             return compact_json([{"type": "text", "text": stripped}])
         return stripped
+    if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+        event_types = {str(item.get("type") or "") for item in value}
+        if event_types & {"instruction", "action", "observation"}:
+            return compact_json(tracejepa_events_to_pi_records(value, task_id=str(row.get("task_id") or "")))
     return compact_json(value)
+
+
+def tracejepa_events_to_pi_records(events: list[dict[str, Any]], *, task_id: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = [
+        {
+            "type": "session",
+            "id": f"tracejepa-{task_id or 'task'}",
+            "cwd": "/home/user",
+        }
+    ]
+    last_tool_call_id = ""
+    assistant_index = 0
+    tool_index = 0
+    for index, event in enumerate(events):
+        event_type = str(event.get("type") or "")
+        text = "" if event.get("text") is None else str(event.get("text"))
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        event_id = str(event.get("event_id") or f"{task_id}-event-{index:05d}")
+
+        if event_type == "instruction":
+            records.append(
+                {
+                    "type": "message",
+                    "id": event_id,
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": text}],
+                    },
+                }
+            )
+            continue
+
+        if event_type == "action":
+            tool_name = str(metadata.get("tool_name") or "bash")
+            last_tool_call_id = f"tracejepa-call-{assistant_index:04d}"
+            records.append(
+                {
+                    "type": "message",
+                    "id": event_id,
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "toolCall",
+                                "id": last_tool_call_id,
+                                "name": tool_name,
+                                "arguments": {"command": text},
+                            }
+                        ],
+                        "stopReason": "toolUse",
+                    },
+                }
+            )
+            assistant_index += 1
+            continue
+
+        if event_type == "observation":
+            tool_name = str(metadata.get("tool_name") or "bash")
+            records.append(
+                {
+                    "type": "message",
+                    "id": event_id,
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": metadata.get("tool_call_id") or last_tool_call_id or f"tracejepa-tool-{tool_index:04d}",
+                        "toolName": tool_name,
+                        "content": [{"type": "text", "text": text}],
+                    },
+                }
+            )
+            tool_index += 1
+            continue
+
+        if text:
+            records.append(
+                {
+                    "type": "message",
+                    "id": event_id,
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": text}],
+                    },
+                }
+            )
+    return records
 
 
 def command_value(command: Any, flag: str) -> str | None:
@@ -121,15 +220,23 @@ def normalize_tracejepa_row(
     pi_command = nested_get(row, "pi_command", "manifest.pi_command")
     task_id = nested_get(row, "task_id", "id", "session_id", "trace_id", "base_task_id")
     prompt = nested_get(row, "prompt", "instruction", "message", "task.prompt", "metadata.prompt")
+    if prompt is None and isinstance(row.get("goal_events"), list):
+        for event in row["goal_events"]:
+            if isinstance(event, dict) and event.get("type") == "instruction" and event.get("text"):
+                prompt = event.get("text")
+                break
     cwd = nested_get(row, "cwd", "repo", "task.cwd", "metadata.cwd")
     model = nested_get(row, "model", "model_id", "model_name", "provider_model", "metadata.model")
     provider = nested_get(row, "provider", "metadata.provider")
+    status = nested_get(row, "status", "manifest.status")
+    if status is None and "success" in row:
+        status = "ok" if row.get("success") else "error"
 
     return etpi_upload.normalize_index_row(
         {
             "run_id": run_id,
             "task_id": task_id or f"{run_id}_{row_index:06d}",
-            "status": nested_get(row, "status") or "ok",
+            "status": status or "ok",
             "prompt": prompt,
             "cwd": cwd,
             "session_path": nested_get(row, "session_path"),
@@ -171,13 +278,21 @@ def select_rows(
 ) -> tuple[list[dict[str, str | float | bool]], dict[str, int]]:
     pattern = re.compile(model_pattern, re.IGNORECASE)
     selected: list[dict[str, str | float | bool]] = []
+    seen_trajectories: set[str] = set()
     scanned = 0
     skipped = 0
+    duplicate_transitions = 0
     for row in rows:
         scanned += 1
         if not row_matches_model(row, pattern):
             skipped += 1
             continue
+        trajectory_id = row.get("trajectory_id")
+        if isinstance(trajectory_id, str) and trajectory_id:
+            if trajectory_id in seen_trajectories:
+                duplicate_transitions += 1
+                continue
+            seen_trajectories.add(trajectory_id)
         selected.append(
             normalize_tracejepa_row(
                 row,
@@ -188,7 +303,12 @@ def select_rows(
         )
         if max_rows is not None and len(selected) >= max_rows:
             break
-    return selected, {"scanned": scanned, "selected": len(selected), "skipped": skipped}
+    return selected, {
+        "scanned": scanned,
+        "selected": len(selected),
+        "skipped": skipped,
+        "duplicate_transitions": duplicate_transitions,
+    }
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -226,9 +346,25 @@ def upload_index_rows(
         )
 
 
+def resolve_hf_token(token_env: str) -> str | None:
+    token = os.environ.get(token_env)
+    if token:
+        return token
+    try:
+        from huggingface_hub import get_token
+    except ImportError:
+        return None
+    return get_token()
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract TraceJEPA Qwen-27B Pi rows into ETPI's HF index schema.")
     parser.add_argument("--source-dataset", default=DEFAULT_SOURCE_DATASET)
+    parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG,
+        help="HF dataset config. TraceJEPA currently exposes trajectories and transitions.",
+    )
     parser.add_argument("--target-repo", default=DEFAULT_TARGET_REPO)
     parser.add_argument("--split", default="train")
     parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
@@ -250,7 +386,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.source_jsonl:
         source_rows = iter_jsonl_rows(args.source_jsonl)
     else:
-        source_rows = iter_hf_rows(args.source_dataset, split=args.split, streaming=not args.no_streaming)
+        source_rows = iter_hf_rows(
+            args.source_dataset,
+            config=args.config,
+            split=args.split,
+            streaming=not args.no_streaming,
+        )
 
     rows, stats = select_rows(
         source_rows,
@@ -267,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
             rows,
             repo_id=args.target_repo,
             run_id=args.run_id,
-            token=os.environ.get(args.token_env),
+            token=resolve_hf_token(args.token_env),
             private=args.private,
             commit_message=args.commit_message,
         )
