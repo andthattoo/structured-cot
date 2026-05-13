@@ -63,7 +63,17 @@ echo
 # Port mapping binds to $BIND_HOST (default 127.0.0.1) so the server isn't
 # reachable from the public internet. Override with BIND_HOST=0.0.0.0 only
 # behind auth.
-exec docker run --gpus all --rm -it \
+#
+# Use -it (interactive + tty) only when stdin is a real terminal; under
+# systemd there's no TTY and docker errors out with "the input device is
+# not a TTY".
+if [ -t 0 ]; then
+    DOCKER_TTY_FLAGS="-it"
+else
+    DOCKER_TTY_FLAGS=""
+fi
+
+exec docker run --gpus all --rm $DOCKER_TTY_FLAGS \
   --ipc=host --shm-size=32g \
   -v "$HF_CACHE:/root/.cache/huggingface" \
   -p "$BIND_HOST:$PORT:30000" \
