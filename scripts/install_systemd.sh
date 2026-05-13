@@ -26,6 +26,7 @@ SYSTEMD_DIR="/etc/systemd/system"
 INSTALL_ONLY="${INSTALL_ONLY:-0}"
 
 N_TASKS="${N_TASKS:-200}"
+OFFSET="${OFFSET:-0}"
 SAMPLES_PER_TASK="${SAMPLES_PER_TASK:-4}"
 CONCURRENCY="${CONCURRENCY:-4}"
 MAX_TURNS="${MAX_TURNS:-30}"
@@ -41,7 +42,7 @@ echo "[install] config:"
 echo "  structured-cot = $SC_REPO"
 echo "  R2E-Gym        = $R2E_REPO"
 echo "  user           = $RUN_USER"
-echo "  batch args     = --n-tasks $N_TASKS --samples-per-task $SAMPLES_PER_TASK \\"
+echo "  batch args     = --n-tasks $N_TASKS --offset $OFFSET --samples-per-task $SAMPLES_PER_TASK \\"
 echo "                   --concurrency $CONCURRENCY --max-turns $MAX_TURNS --shuffle --seed $SEED \\"
 echo "                   $RUN_ID_FLAG"
 echo
@@ -92,7 +93,7 @@ Type=simple
 User=$RUN_USER
 WorkingDirectory=$R2E_REPO
 ExecStartPre=/bin/bash -lc 'until curl -s -f http://127.0.0.1:30000/v1/models > /dev/null; do echo "waiting for sglang..."; sleep 5; done'
-ExecStart=/bin/bash -lc 'cd $R2E_REPO && uv run python $SC_REPO/scripts/grammar_rollout_batch.py --n-tasks $N_TASKS --samples-per-task $SAMPLES_PER_TASK --concurrency $CONCURRENCY --max-turns $MAX_TURNS --shuffle --seed $SEED $RUN_ID_FLAG'
+ExecStart=/bin/bash -lc 'cd $R2E_REPO && uv run python $SC_REPO/scripts/grammar_rollout_batch.py --n-tasks $N_TASKS --offset $OFFSET --samples-per-task $SAMPLES_PER_TASK --concurrency $CONCURRENCY --max-turns $MAX_TURNS --shuffle --seed $SEED $RUN_ID_FLAG'
 Restart=no
 TimeoutStartSec=14400
 StandardOutput=journal

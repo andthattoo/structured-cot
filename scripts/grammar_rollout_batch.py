@@ -184,6 +184,11 @@ class StatusTracker:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--n-tasks", type=int, default=200)
+    p.add_argument("--offset", type=int, default=0,
+                   help="skip the first N indices of the (shuffled) task list. "
+                        "Lets you generate a non-overlapping second batch by "
+                        "re-running with --offset N where N is the prior run's "
+                        "--n-tasks. Same --seed must be used both runs.")
     p.add_argument("--samples-per-task", type=int, default=4)
     p.add_argument("--concurrency", type=int, default=4,
                    help="parallel rollouts (each spins its own docker container)")
@@ -221,9 +226,9 @@ def main() -> None:
     indices = list(range(len(ds)))
     if args.shuffle:
         random.Random(args.seed).shuffle(indices)
-    indices = indices[: args.n_tasks]
+    indices = indices[args.offset : args.offset + args.n_tasks]
     print(f"[batch] selected {len(indices)} task indices "
-          f"(shuffle={args.shuffle}, seed={args.seed})")
+          f"(shuffle={args.shuffle}, seed={args.seed}, offset={args.offset})")
 
     # Build the flat (row_idx, sample_idx) work list
     work: list[tuple[int, int]] = []
