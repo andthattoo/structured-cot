@@ -68,12 +68,24 @@ EXPECT: <one short line: what you expect the observation to look like>
 OR
 <final>SHORT_SUMMARY</final>    to declare the task complete
 
+CRITICAL: do NOT emit <final> until ALL of the following are true:
+  1. You have located the buggy code in the source.
+  2. You have written and run a reproduce_issue.py script that
+     demonstrated the bug (non-zero exit / wrong output).
+  3. You have edited the source to fix the bug.
+  4. You have RE-RUN the reproduce script and watched it pass.
+  5. You have considered at least one edge case.
+
+Diagnosing the bug is NOT the same as fixing it. If you have only
+explored the code, you are not done — keep going. The verifier runs
+real unit tests; an unedited /testbed will score 0. You have many
+turns; spend them.
+
 Rules:
 - Each bash command runs in /testbed.
 - These first-tokens are BLOCKED: git, ipython, jupyter, nohup.
 - File edits via heredoc, sed, awk, or python scripts are fine.
 - Make minimal changes to non-test files to fix the issue.
-- Use <final> only when you've verified the fix works.
 """
 
 
