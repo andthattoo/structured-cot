@@ -123,12 +123,13 @@ fi
 # Make sure any panes running these services manually are stopped first.
 # It's harmless if they aren't running.
 echo "[install] starting services..."
-$SUDO systemctl start sglang.service
-echo "[install] sglang started (it will take 30-90s to load weights)"
+# --no-block returns immediately; systemd activates in the background.
+# Without it, `systemctl start` waits for ExecStartPre to finish, which for
+# rollout means waiting on SGLang's full weight-load (30-90s).
+$SUDO systemctl start --no-block sglang.service
+echo "[install] sglang queued"
 
-# rollout's ExecStartPre polls /v1/models until sglang is ready, so we can
-# start it immediately — systemd holds it in 'activating' until sglang answers
-$SUDO systemctl start rollout.service
+$SUDO systemctl start --no-block rollout.service
 echo "[install] rollout queued (will activate once sglang answers /v1/models)"
 echo
 
