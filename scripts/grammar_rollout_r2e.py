@@ -28,6 +28,7 @@ from typing import Any
 from datasets import load_dataset
 from openai import OpenAI
 
+import r2egym
 from r2egym.agenthub.action.action import Action
 from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
 
@@ -35,6 +36,19 @@ from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 GRAMMAR_PATH = REPO_ROOT / "grammars" / "fsm_grammar_pi_turn.gbnf"
+
+# R2E env.step() looks up the action's function_name in self.commands. That
+# dict is populated by env.add_commands([tool_script_paths...]). Without
+# calling it, every step() errors with "RepoEnv has no attribute 'commands'"
+# and bash_output comes back empty. Paths come from the canonical
+# edit_fn_calling.yaml config.
+R2EGYM_TOOLS_DIR = Path(r2egym.__file__).parent / "agenthub" / "tools"
+R2E_COMMAND_FILES: list[str] = [
+    str(R2EGYM_TOOLS_DIR / "r2egym" / "file_editor.py"),
+    str(R2EGYM_TOOLS_DIR / "search.py"),
+    str(R2EGYM_TOOLS_DIR / "r2egym" / "execute_bash.py"),
+    str(R2EGYM_TOOLS_DIR / "finish.py"),
+]
 
 BASH_RE = re.compile(r"<bash>(.*?)</bash>", re.DOTALL)
 FINAL_RE = re.compile(r"<final>(.*?)</final>", re.DOTALL)
@@ -74,14 +88,10 @@ def extract_action(text: str) -> dict | None:
 
 
 def observation_to_text(obs: Any, char_limit: int = 8000) -> str:
-    """Best-effort render of an r2egym Observation back to a string."""
-    for attr in ("output", "obs", "content", "stdout"):
-        val = getattr(obs, attr, None)
-        if isinstance(val, str) and val:
-            text = val
-            break
-    else:
-        text = obs if isinstance(obs, str) else repr(obs)
+    """Render an r2egym Observation using its built-in __str__ formatter,
+    which already produces "Exit code: N\\nExecution output of [tool]:\\n..."
+    and handles middle-truncation for long output."""
+    text = str(obs)
     if len(text) > char_limit:
         text = text[:char_limit] + f"\n...[truncated {len(text) - char_limit} chars]"
     return text
@@ -108,6 +118,7 @@ def run_one_rollout(
         step_timeout=step_timeout,
         reward_timeout=reward_timeout,
     )
+    env.add_commands(R2E_COMMAND_FILES)
     task_instruction = env.get_task_instruction()
     client = OpenAI(base_url=base_url, api_key="not-needed")
 
