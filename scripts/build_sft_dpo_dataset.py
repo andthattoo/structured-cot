@@ -38,9 +38,12 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from grammar_rollout_r2e import SYSTEM_PROMPT  # noqa: E402
 
 
-def load_traces(traces_dir: Path) -> list[dict]:
+def load_traces(traces_dir: Path, recurse: bool = False) -> list[dict]:
     out = []
-    for path in sorted(traces_dir.glob("*.json")):
+    paths = (
+        traces_dir.glob("**/*.json") if recurse else traces_dir.glob("*.json")
+    )
+    for path in sorted(paths):
         if path.name.startswith("_"):
             continue  # _status.json
         try:
@@ -87,7 +90,12 @@ def build_messages(trace: dict, task_instruction: str) -> list[dict]:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--traces-dir", required=True)
+    p.add_argument("--traces-dir", required=True,
+                   help="single run dir OR a parent containing multiple run "
+                        "dirs (with --recurse)")
+    p.add_argument("--recurse", action="store_true",
+                   help="recurse into subdirs (use when --traces-dir is a "
+                        "parent containing batch1/ batch2/ etc.)")
     p.add_argument("--out-dir", default=None,
                    help="default: datasets/<traces-dir-basename>")
     p.add_argument("--dataset", default="R2E-Gym/R2E-Gym-Lite")
@@ -114,8 +122,8 @@ def main() -> None:
     ds = load_dataset(args.dataset, split=args.split)
     print(f"[build] {len(ds)} dataset rows")
 
-    print("[build] reading traces...")
-    traces = load_traces(traces_dir)
+    print(f"[build] reading traces (recurse={args.recurse})...")
+    traces = load_traces(traces_dir, recurse=args.recurse)
     print(f"[build] {len(traces)} usable trace files")
 
     # Group by row_idx
