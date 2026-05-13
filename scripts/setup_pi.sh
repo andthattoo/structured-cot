@@ -33,14 +33,14 @@ if command -v pi >/dev/null 2>&1; then
 else
     echo "[setup] installing Pi via official installer..."
     curl -fsSL https://pi.dev/install.sh | sh
-    if ! command -v pi >/dev/null 2>&1; then
-        echo
-        echo "[setup] Pi installed but 'pi' is not on PATH in this shell."
-        echo "        Open a new shell (or 'source ~/.bashrc' / '~/.zshrc') and re-run:"
-        echo "        bash scripts/setup_pi.sh"
-        exit 1
+    if command -v pi >/dev/null 2>&1; then
+        echo "[setup] Pi installed: $(pi --version 2>/dev/null | head -1)"
+    else
+        echo "[setup] WARNING: Pi installed but 'pi' isn't on PATH in this shell."
+        echo "        Continuing — the rest of this script (aiohttp + models.json)"
+        echo "        still works. After it finishes, open a new shell so PATH picks"
+        echo "        up the pi binary, then 'pi --list-models' to verify."
     fi
-    echo "[setup] Pi installed: $(pi --version 2>/dev/null | head -1)"
 fi
 
 # ----- 2. aiohttp for the grammar proxy -----------------------------------
