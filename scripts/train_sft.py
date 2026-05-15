@@ -82,6 +82,22 @@ def main() -> None:
     )
     model.config.use_cache = False  # incompatible with gradient checkpointing
 
+    # Qwen 3.5 hybrid (mamba + attention) doesn't set _no_split_modules,
+    # which PEFT's fsdp_auto_wrap_policy requires for TRANSFORMER_BASED_WRAP.
+    # Auto-detect decoder layer classes and patch.
+    existing = getattr(model, "_no_split_modules", None) or []
+    if not existing:
+        layer_classes = set()
+        for module in model.modules():
+            cls_name = type(module).__name__
+            if "DecoderLayer" in cls_name or cls_name.endswith(("Block",)):
+                layer_classes.add(cls_name)
+        if layer_classes:
+            model._no_split_modules = list(layer_classes)
+            print(f"[sft] patched _no_split_modules = {model._no_split_modules}")
+        else:
+            print("[sft] WARN: could not detect any DecoderLayer class on model")
+
     lora_config = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
