@@ -181,9 +181,15 @@ def main() -> None:
 
     print("[sft] starting training...")
     trainer.train()
-    print(f"[sft] saving adapter to: {adapter_dir}")
+    if trainer.is_world_process_zero():
+        print(f"[sft] saving adapter to: {adapter_dir}")
     trainer.save_model(str(adapter_dir))
-    tokenizer.save_pretrained(str(adapter_dir))
+    if trainer.is_world_process_zero():
+        tokenizer.save_pretrained(str(adapter_dir))
+    trainer.accelerator.wait_for_everyone()
+
+    if not trainer.is_world_process_zero():
+        return
 
     # ---- merge into base weights ----
     # Free the training model + clear cache before reloading for merge.
