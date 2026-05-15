@@ -23,6 +23,8 @@ Run on the 2x A100 box:
 from __future__ import annotations
 
 import argparse
+import os
+from collections import Counter
 from pathlib import Path
 
 import torch
@@ -30,6 +32,45 @@ from datasets import load_dataset
 from peft import LoraConfig, PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
+
+
+def configure_fsdp_wrap_classes(model: torch.nn.Module) -> None:
+    """Make PEFT/FSDP wrap the actual decoder layer classes in this model.
+
+    Some hybrid Qwen checkpoints expose a stale or overly broad
+    _no_split_modules list. PEFT's FSDP helper errors if any listed class is
+    absent, so validate against the loaded module tree and pass the result
+    explicitly through the env var PEFT reads.
+    """
+    class_counts = Counter(type(module).__name__ for module in model.modules())
+    existing = list(getattr(model, "_no_split_modules", None) or [])
+    present_existing = [name for name in existing if class_counts.get(name, 0) > 0]
+
+    decoder_layers = sorted(
+        name
+        for name, count in class_counts.items()
+        if count >= 2 and "DecoderLayer" in name
+    )
+    block_layers = sorted(
+        name
+        for name, count in class_counts.items()
+        if count >= 2 and name.endswith("Block")
+    )
+
+    wrap_classes = decoder_layers or present_existing or block_layers
+    if not wrap_classes:
+        common = ", ".join(
+            f"{name}:{count}" for name, count in class_counts.most_common(20)
+        )
+        print(f"[sft] WARN: could not detect FSDP wrap class. common={common}")
+        return
+
+    model._no_split_modules = wrap_classes
+    os.environ["FSDP_TRANSFORMER_CLS_TO_WRAP"] = ",".join(wrap_classes)
+    print(f"[sft] fsdp wrap classes = {wrap_classes}")
+    missing_existing = [name for name in existing if name not in present_existing]
+    if missing_existing:
+        print(f"[sft] ignored absent _no_split_modules = {missing_existing}")
 
 
 def main() -> None:
@@ -82,21 +123,7 @@ def main() -> None:
     )
     model.config.use_cache = False  # incompatible with gradient checkpointing
 
-    # Qwen 3.5 hybrid (mamba + attention) doesn't set _no_split_modules,
-    # which PEFT's fsdp_auto_wrap_policy requires for TRANSFORMER_BASED_WRAP.
-    # Auto-detect decoder layer classes and patch.
-    existing = getattr(model, "_no_split_modules", None) or []
-    if not existing:
-        layer_classes = set()
-        for module in model.modules():
-            cls_name = type(module).__name__
-            if "DecoderLayer" in cls_name or cls_name.endswith(("Block",)):
-                layer_classes.add(cls_name)
-        if layer_classes:
-            model._no_split_modules = list(layer_classes)
-            print(f"[sft] patched _no_split_modules = {model._no_split_modules}")
-        else:
-            print("[sft] WARN: could not detect any DecoderLayer class on model")
+    configure_fsdp_wrap_classes(model)
 
     lora_config = LoraConfig(
         r=args.lora_rank,
