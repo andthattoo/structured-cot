@@ -25,9 +25,10 @@
 #   - 4×80GB: comfortable at seq 32k
 #   - 8×80GB: lots of headroom, ~5x faster wall-clock
 
-set -e
+set -euo pipefail
 
 NUM_GPUS=$(nvidia-smi --list-gpus | wc -l)
+BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3.6-27B}"
 NUM_EPOCHS="${NUM_EPOCHS:-5}"
 MAX_LENGTH="${MAX_LENGTH:-32768}"
 LR="${LR:-3e-4}"
@@ -37,6 +38,7 @@ DATASET="${DATASET:-andthattoo/etpi-sft}"
 
 echo "[launcher] detected $NUM_GPUS GPUs"
 echo "[launcher] config: epochs=$NUM_EPOCHS max_length=$MAX_LENGTH lr=$LR"
+echo "[launcher] base model: $BASE_MODEL"
 echo "[launcher] dataset: $DATASET"
 
 # Install training deps that aren't already in the sglang image.
@@ -48,6 +50,32 @@ pip install --quiet \
     "datasets" \
     "huggingface_hub" \
     "accelerate>=1.0" 2>&1 | tail -3
+
+# Resolve the model snapshot once before spawning distributed workers. If the
+# shared HF cache has an incomplete snapshot, this repairs or fails it in one
+# process instead of letting eight ranks race and killing the job with a vague
+# torch.distributed ChildFailedError.
+python - <<PY
+from huggingface_hub import snapshot_download
+
+model_id = "$BASE_MODEL"
+path = snapshot_download(
+    repo_id=model_id,
+    allow_patterns=[
+        "config.json",
+        "configuration*.py",
+        "generation_config.json",
+        "model*.safetensors",
+        "model.safetensors.index.json",
+        "tokenizer*",
+        "*.model",
+        "*.tiktoken",
+        "*.json",
+        "*.py",
+    ],
+)
+print(f"[launcher] cached model snapshot: {path}")
+PY
 
 # Pull the SFT dataset locally as JSONL.
 python -c "
@@ -88,11 +116,15 @@ use_cpu: false
 YAML
 
 # Launch.
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+
 accelerate launch \
     --config_file /tmp/fsdp_config.yaml \
     --num_processes "$NUM_GPUS" \
     /workspace/train_sft.py \
     --sft-jsonl /workspace/sft.jsonl \
+    --base-model "$BASE_MODEL" \
     --out-dir /workspace/sft_run \
     --num-epochs "$NUM_EPOCHS" \
     --max-length "$MAX_LENGTH" \
