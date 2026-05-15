@@ -190,6 +190,16 @@ def main() -> None:
 
     if not trainer.is_world_process_zero():
         return
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        print("[sft] distributed training complete; skipping in-process merge.")
+        print("[sft] merge separately with:")
+        print(
+            "  python scripts/merge_lora.py "
+            f"--base-model {args.base_model} "
+            f"--adapter-dir {adapter_dir} "
+            f"--out-dir {merged_dir}"
+        )
+        return
 
     # ---- merge into base weights ----
     # Free the training model + clear cache before reloading for merge.
