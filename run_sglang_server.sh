@@ -38,12 +38,23 @@ EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 mkdir -p "$HF_CACHE"
 
+MODEL_PATH="$MODEL"
+MODEL_MOUNT_ARGS=()
+if [ -d "$MODEL" ]; then
+    MODEL_HOST_PATH="$(cd "$MODEL" && pwd)"
+    MODEL_PATH="/models/local_model"
+    MODEL_MOUNT_ARGS=(-v "$MODEL_HOST_PATH:$MODEL_PATH:ro")
+fi
+
 echo "Pulling $IMAGE (5-15 GB; one-time per host)..."
 docker pull "$IMAGE"
 
 echo
 echo "Starting SGLang server"
 echo "  model = $MODEL"
+if [ "$MODEL_PATH" != "$MODEL" ]; then
+echo "  mount = $MODEL -> $MODEL_PATH"
+fi
 echo "  tp    = $TP"
 echo "  bind  = $BIND_HOST:$PORT  (host -> container 30000)"
 echo "  cache = $HF_CACHE -> /root/.cache/huggingface"
@@ -76,10 +87,11 @@ fi
 exec docker run --gpus all --rm $DOCKER_TTY_FLAGS \
   --ipc=host --shm-size=32g \
   -v "$HF_CACHE:/root/.cache/huggingface" \
+  "${MODEL_MOUNT_ARGS[@]}" \
   -p "$BIND_HOST:$PORT:30000" \
   "$IMAGE" \
   python3 -m sglang.launch_server \
-    --model-path "$MODEL" \
+    --model-path "$MODEL_PATH" \
     --tp "$TP" \
     --host 0.0.0.0 --port 30000 \
     --grammar-backend xgrammar \
