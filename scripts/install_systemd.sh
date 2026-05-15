@@ -92,9 +92,15 @@ Requires=sglang.service
 Type=simple
 User=$RUN_USER
 WorkingDirectory=$R2E_REPO
+# R2E spawns a docker container per task; FDs + leftover containers add up
+# fast over thousands of rollouts. Raise FD limit and add a pre-start
+# cleanup so we don't repeat the overnight disk-full / EMFILE crash.
+LimitNOFILE=65536
+ExecStartPre=/bin/bash -lc 'docker container prune -f >/dev/null 2>&1 || true'
 ExecStartPre=/bin/bash -lc 'until curl -s -f http://127.0.0.1:30000/v1/models > /dev/null; do echo "waiting for sglang..."; sleep 5; done'
 ExecStart=/bin/bash -lc 'cd $R2E_REPO && uv run python $SC_REPO/scripts/grammar_rollout_batch.py --n-tasks $N_TASKS --offset $OFFSET --samples-per-task $SAMPLES_PER_TASK --concurrency $CONCURRENCY --max-turns $MAX_TURNS --shuffle --seed $SEED $RUN_ID_FLAG'
-Restart=no
+Restart=on-failure
+RestartSec=30s
 TimeoutStartSec=14400
 StandardOutput=journal
 StandardError=journal
