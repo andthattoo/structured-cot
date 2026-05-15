@@ -17,7 +17,7 @@
 #       bash /workspace/run.sh
 #
 # Override hyperparams via env vars:
-#   NUM_EPOCHS=5 MAX_LENGTH=16384 LR=3e-4 bash run_train_multigpu.sh
+#   NUM_EPOCHS=2 MAX_LENGTH=24576 LR=3e-4 bash run_train_multigpu.sh
 #
 # Memory math for 27B + LoRA at seq 32k, FSDP across N GPUs:
 #   - 1×80GB: OOM (~30GB short)
@@ -29,10 +29,10 @@ set -euo pipefail
 
 NUM_GPUS=$(nvidia-smi --list-gpus | wc -l)
 BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3.6-27B}"
-NUM_EPOCHS="${NUM_EPOCHS:-5}"
+NUM_EPOCHS="${NUM_EPOCHS:-2}"
 # This is a short format-warmup SFT pass, not long-context finetuning.
-# 32k makes rare long traces painfully slow with SDPA/torch fallback on A100s.
-MAX_LENGTH="${MAX_LENGTH:-8192}"
+# 16k keeps the median IR trace intact while avoiding the 32k crawl on A100s.
+MAX_LENGTH="${MAX_LENGTH:-16384}"
 LR="${LR:-3e-4}"
 SAVE_STEPS="${SAVE_STEPS:-50}"
 LOGGING_STEPS="${LOGGING_STEPS:-2}"
