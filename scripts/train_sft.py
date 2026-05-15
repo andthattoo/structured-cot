@@ -10,12 +10,11 @@ Run on the 2x A100 box:
                 "transformers>=4.45" "accelerate>=0.34" datasets
     # optionally: pip install flash-attn --no-build-isolation
 
-    # single-GPU debug (cuts seq_len, slow):
+    # single-GPU H100 (1× 80 GB, LoRA rank 128, fits comfortably):
     python scripts/train_sft.py \\
-        --sft-jsonl datasets/20260513_102140/sft.jsonl \\
-        --out-dir models/sft_20260513_102140
+        --sft-jsonl sft.jsonl --out-dir models/sft_out
 
-    # 2-GPU DDP (recommended for 27B + LoRA — both A100s, near-linear scale):
+    # 2-GPU DDP (recommended for 27B + LoRA on 2× A100, near-linear scale):
     accelerate launch --num_processes 2 --mixed_precision bf16 \\
         scripts/train_sft.py \\
         --sft-jsonl datasets/20260513_102140/sft.jsonl \\
@@ -46,14 +45,21 @@ def main() -> None:
     p.add_argument("--grad-accum", type=int, default=8)
     p.add_argument("--lora-rank", type=int, default=128)
     p.add_argument("--lora-alpha", type=int, default=256)
-    p.add_argument("--max-seq-length", type=int, default=8192,
+    p.add_argument("--max-length", type=int, default=8192,
                    help="trajectories longer than this get truncated. "
                         "Most R2E trajectories fit; the few long ones "
-                        "(30 turns with big heredocs) we accept losing.")
+                        "(30 turns with big heredocs) we accept losing. "
+                        "Renamed from --max-seq-length to match TRL 1.x.")
     p.add_argument("--save-steps", type=int, default=200)
     p.add_argument("--logging-steps", type=int, default=5)
     p.add_argument("--warmup-ratio", type=float, default=0.03)
-    p.add_argument("--no-flash-attn", action="store_true")
+    p.add_argument("--attn-impl", default="sdpa",
+                   choices=["sdpa", "eager", "flash_attention_2"],
+                   help="attention backend. sdpa is the default and uses "
+                        "PyTorch's memory-efficient backend — no flash-attn "
+                        "library required, similar memory profile.")
+    p.add_argument("--no-flash-attn", action="store_true",
+                   help="legacy alias for --attn-impl eager")
     args = p.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -66,9 +72,8 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     print(f"[sft] loading base model: {args.base_model}")
-    attn_impl = "flash_attention_2"
-    if args.no_flash_attn:
-        attn_impl = "eager"
+    attn_impl = "eager" if args.no_flash_attn else args.attn_impl
+    print(f"[sft] attn_implementation = {attn_impl}")
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         torch_dtype=torch.bfloat16,
@@ -104,8 +109,13 @@ def main() -> None:
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=2,
-        max_seq_length=args.max_seq_length,
+        max_length=args.max_length,
         packing=False,
+        # Liger kernel fuses cross-entropy with the LM head to avoid
+        # materializing the full [batch, seq, vocab] logits tensor.
+        # Without it, at seq 8192 × vocab 152k Qwen blows out the
+        # H100 80GB just on the loss compute.
+        use_liger_kernel=True,
         # Mask loss on system + user messages; only train on assistant tokens.
         # Critical for agent trajectories: we don't want to learn to predict
         # bash observations (those are environment-provided, not policy output).
