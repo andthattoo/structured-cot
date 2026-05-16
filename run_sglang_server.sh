@@ -10,6 +10,9 @@
 #   IMAGE          docker image                (default: lmsysorg/sglang:latest)
 #   HF_CACHE       host path for HF cache      (default: ~/.cache/huggingface)
 #   MAX_LEN        max context length          (default: 32768)
+#   LORA_PATH      optional LoRA adapter id or local path
+#   LORA_NAME      adapter name for OpenAI model syntax (default: ir)
+#   MAX_LORA_RANK  max LoRA rank when LORA_PATH is set (default: 128)
 #   BIND_HOST      host address to bind to     (default: 127.0.0.1)
 #                  Use 0.0.0.0 only if you've put SGLang behind a proper auth
 #                  layer; otherwise the open port becomes a free-LLM proxy
@@ -33,6 +36,9 @@ TP="${TP:-2}"
 IMAGE="${IMAGE:-lmsysorg/sglang:latest}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 MAX_LEN="${MAX_LEN:-32768}"
+LORA_PATH="${LORA_PATH:-}"
+LORA_NAME="${LORA_NAME:-ir}"
+MAX_LORA_RANK="${MAX_LORA_RANK:-128}"
 BIND_HOST="${BIND_HOST:-127.0.0.1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -44,6 +50,24 @@ if [ -d "$MODEL" ]; then
     MODEL_HOST_PATH="$(cd "$MODEL" && pwd)"
     MODEL_PATH="/models/local_model"
     MODEL_MOUNT_ARGS=(-v "$MODEL_HOST_PATH:$MODEL_PATH:ro")
+fi
+
+LORA_CONTAINER_PATH="$LORA_PATH"
+LORA_MOUNT_ARGS=()
+LORA_ARGS=()
+if [ -n "$LORA_PATH" ]; then
+    if [ -d "$LORA_PATH" ]; then
+        LORA_HOST_PATH="$(cd "$LORA_PATH" && pwd)"
+        LORA_CONTAINER_PATH="/models/local_lora"
+        LORA_MOUNT_ARGS=(-v "$LORA_HOST_PATH:$LORA_CONTAINER_PATH:ro")
+    fi
+    LORA_ARGS=(
+        --enable-lora
+        --lora-paths "$LORA_NAME=$LORA_CONTAINER_PATH"
+        --max-loras-per-batch 2
+        --max-lora-rank "$MAX_LORA_RANK"
+        --lora-target-modules all
+    )
 fi
 
 echo "Pulling $IMAGE (5-15 GB; one-time per host)..."
@@ -59,6 +83,10 @@ echo "  tp    = $TP"
 echo "  bind  = $BIND_HOST:$PORT  (host -> container 30000)"
 echo "  cache = $HF_CACHE -> /root/.cache/huggingface"
 echo "  ctx   = $MAX_LEN"
+if [ -n "$LORA_PATH" ]; then
+echo "  lora  = $LORA_NAME=$LORA_PATH"
+echo "  use   = $MODEL:$LORA_NAME"
+fi
 echo "  image = $IMAGE"
 echo
 echo "Parsers: --tool-call-parser qwen3_coder"
@@ -88,6 +116,7 @@ exec docker run --gpus all --rm $DOCKER_TTY_FLAGS \
   --ipc=host --shm-size=32g \
   -v "$HF_CACHE:/root/.cache/huggingface" \
   "${MODEL_MOUNT_ARGS[@]}" \
+  "${LORA_MOUNT_ARGS[@]}" \
   -p "$BIND_HOST:$PORT:30000" \
   "$IMAGE" \
   python3 -m sglang.launch_server \
@@ -97,4 +126,5 @@ exec docker run --gpus all --rm $DOCKER_TTY_FLAGS \
     --grammar-backend xgrammar \
     --context-length "$MAX_LEN" \
     --tool-call-parser qwen3_coder \
+    "${LORA_ARGS[@]}" \
     $EXTRA_ARGS
