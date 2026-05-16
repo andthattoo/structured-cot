@@ -28,10 +28,14 @@ def main() -> None:
         trust_remote_code=True,
         device_map="auto",
     )
+    base_architectures = list(getattr(base.config, "architectures", None) or [])
     print(f"[merge] loading adapter: {adapter_dir}")
     peft_model = PeftModel.from_pretrained(base, str(adapter_dir))
     print("[merge] merging adapter into base weights")
     merged = peft_model.merge_and_unload()
+    if base_architectures:
+        merged.config.architectures = base_architectures
+        print(f"[merge] preserving base architectures: {base_architectures}")
     print(f"[merge] saving merged checkpoint: {out_dir}")
     merged.save_pretrained(
         str(out_dir),
