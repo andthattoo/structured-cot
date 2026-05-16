@@ -10,6 +10,7 @@
 #   IMAGE          docker image                (default: lmsysorg/sglang:latest)
 #   HF_CACHE       host path for HF cache      (default: ~/.cache/huggingface)
 #   MAX_LEN        max context length          (default: 32768)
+#   LANGUAGE_ONLY  force text-only serving     (default: 0)
 #   LORA_PATH      optional LoRA adapter id or local path
 #   LORA_NAME      adapter name for OpenAI model syntax (default: ir)
 #   MAX_LORA_RANK  max LoRA rank when LORA_PATH is set (default: 128)
@@ -39,6 +40,7 @@ TP="${TP:-2}"
 IMAGE="${IMAGE:-lmsysorg/sglang:latest}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 MAX_LEN="${MAX_LEN:-32768}"
+LANGUAGE_ONLY="${LANGUAGE_ONLY:-0}"
 LORA_PATH="${LORA_PATH:-}"
 LORA_NAME="${LORA_NAME:-ir}"
 MAX_LORA_RANK="${MAX_LORA_RANK:-128}"
@@ -77,6 +79,11 @@ if [ -n "$LORA_PATH" ]; then
     fi
 fi
 
+LANGUAGE_ARGS=()
+if [ "$LANGUAGE_ONLY" = "1" ]; then
+    LANGUAGE_ARGS=(--language-only)
+fi
+
 echo "Pulling $IMAGE (5-15 GB; one-time per host)..."
 docker pull "$IMAGE"
 
@@ -90,6 +97,9 @@ echo "  tp    = $TP"
 echo "  bind  = $BIND_HOST:$PORT  (host -> container 30000)"
 echo "  cache = $HF_CACHE -> /root/.cache/huggingface"
 echo "  ctx   = $MAX_LEN"
+if [ "$LANGUAGE_ONLY" = "1" ]; then
+echo "  mode  = language-only"
+fi
 if [ -n "$LORA_PATH" ]; then
 echo "  lora  = $LORA_NAME=$LORA_PATH"
 echo "  use   = $MODEL:$LORA_NAME"
@@ -133,5 +143,6 @@ exec docker run --gpus all --rm $DOCKER_TTY_FLAGS \
     --grammar-backend xgrammar \
     --context-length "$MAX_LEN" \
     --tool-call-parser qwen3_coder \
+    "${LANGUAGE_ARGS[@]}" \
     "${LORA_ARGS[@]}" \
     $EXTRA_ARGS
