@@ -13,6 +13,9 @@
 #   LORA_PATH      optional LoRA adapter id or local path
 #   LORA_NAME      adapter name for OpenAI model syntax (default: ir)
 #   MAX_LORA_RANK  max LoRA rank when LORA_PATH is set (default: 128)
+#   LORA_TARGET_MODULES
+#                  optional space-separated modules; omitted by default so
+#                  SGLang infers from the adapter
 #   BIND_HOST      host address to bind to     (default: 127.0.0.1)
 #                  Use 0.0.0.0 only if you've put SGLang behind a proper auth
 #                  layer; otherwise the open port becomes a free-LLM proxy
@@ -39,6 +42,7 @@ MAX_LEN="${MAX_LEN:-32768}"
 LORA_PATH="${LORA_PATH:-}"
 LORA_NAME="${LORA_NAME:-ir}"
 MAX_LORA_RANK="${MAX_LORA_RANK:-128}"
+LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-}"
 BIND_HOST="${BIND_HOST:-127.0.0.1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -66,8 +70,11 @@ if [ -n "$LORA_PATH" ]; then
         --lora-paths "$LORA_NAME=$LORA_CONTAINER_PATH"
         --max-loras-per-batch 2
         --max-lora-rank "$MAX_LORA_RANK"
-        --lora-target-modules all
     )
+    if [ -n "$LORA_TARGET_MODULES" ]; then
+        read -r -a LORA_TARGET_MODULE_ARGS <<< "$LORA_TARGET_MODULES"
+        LORA_ARGS+=(--lora-target-modules "${LORA_TARGET_MODULE_ARGS[@]}")
+    fi
 fi
 
 echo "Pulling $IMAGE (5-15 GB; one-time per host)..."
