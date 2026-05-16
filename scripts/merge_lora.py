@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
 
 import torch
+from huggingface_hub import hf_hub_download
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -28,20 +30,22 @@ def main() -> None:
         trust_remote_code=True,
         device_map="auto",
     )
-    base_architectures = list(getattr(base.config, "architectures", None) or [])
     print(f"[merge] loading adapter: {adapter_dir}")
     peft_model = PeftModel.from_pretrained(base, str(adapter_dir))
     print("[merge] merging adapter into base weights")
     merged = peft_model.merge_and_unload()
-    if base_architectures:
-        merged.config.architectures = base_architectures
-        print(f"[merge] preserving base architectures: {base_architectures}")
     print(f"[merge] saving merged checkpoint: {out_dir}")
     merged.save_pretrained(
         str(out_dir),
         safe_serialization=True,
         max_shard_size=args.max_shard_size,
     )
+    if Path(args.base_model).is_dir():
+        base_config_path = Path(args.base_model) / "config.json"
+    else:
+        base_config_path = Path(hf_hub_download(args.base_model, "config.json"))
+    shutil.copy2(base_config_path, out_dir / "config.json")
+    print(f"[merge] restored base config.json from: {base_config_path}")
 
     tokenizer = AutoTokenizer.from_pretrained(str(adapter_dir), trust_remote_code=True)
     tokenizer.save_pretrained(str(out_dir))
