@@ -11,6 +11,30 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
+SKIP_BASE_METADATA_PATTERNS = (
+    "*.safetensors",
+    "*.bin",
+    "*.pt",
+    "*.pth",
+    "*.gguf",
+    "model.safetensors.index.json",
+    "pytorch_model*.bin.index.json",
+)
+
+
+def copy_base_metadata(base_dir: Path, out_dir: Path) -> None:
+    """Copy tokenizer/processor/config files without overwriting merged weights."""
+    copied: list[str] = []
+    for src in base_dir.iterdir():
+        if not src.is_file():
+            continue
+        if any(src.match(pattern) for pattern in SKIP_BASE_METADATA_PATTERNS):
+            continue
+        shutil.copy2(src, out_dir / src.name)
+        copied.append(src.name)
+    print(f"[merge] restored base metadata files: {', '.join(sorted(copied))}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--base-model", default="Qwen/Qwen3.6-27B")
@@ -41,11 +65,10 @@ def main() -> None:
         max_shard_size=args.max_shard_size,
     )
     if Path(args.base_model).is_dir():
-        base_config_path = Path(args.base_model) / "config.json"
+        base_metadata_dir = Path(args.base_model)
     else:
-        base_config_path = Path(hf_hub_download(args.base_model, "config.json"))
-    shutil.copy2(base_config_path, out_dir / "config.json")
-    print(f"[merge] restored base config.json from: {base_config_path}")
+        base_metadata_dir = Path(hf_hub_download(args.base_model, "config.json")).parent
+    copy_base_metadata(base_metadata_dir, out_dir)
 
     tokenizer = AutoTokenizer.from_pretrained(str(adapter_dir), trust_remote_code=True)
     tokenizer.save_pretrained(str(out_dir))
